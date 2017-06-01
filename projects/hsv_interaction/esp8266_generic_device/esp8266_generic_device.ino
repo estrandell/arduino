@@ -9,20 +9,38 @@
 #include <ESP8266WiFi.h>
 #include <Wire.h>
 
+/**
+ * Interrupts caused by SoftwareSerial disturbs the WS2812 update cycle on the Arduino.
+ * As such we send data over the I2C bus, and may skip the serial com for performance.
+ */
+
+#define USE_SERIAL 1
+#if USE_SERIAL == 1
+  #define SerialAvailable()         Serial.available()
+  #define SerialBegin(x)            Serial.begin(x)
+  #define SerialPrint(x)            Serial.print(x)
+  #define SerialPrintln(x)          Serial.println(x)
+  #define SerialReadStringUntil(x)  Serial.readStringUntil(x)
+#else
+  #define SerialAvailable()         false
+  #define SerialBegin(x)
+  #define SerialPrint(x)
+  #define SerialPrintln(x)
+  #define SerialReadStringUntil(x)  ""
+#endif
+
 /*
  * --- Baud rate on the ESP8266 ---
- * 
  * How to change the baud rate on the ESP8266 will depend on the firmware version. 
  * I've had success with AT+IPR=9600. You only need to run this command once (it's a persistent setting).
  * 
  * 
  * --- How to connect everything ---
- * 
+ * This is far from the whole truth, ill post diagram in the future
  * https://diyhacking.com/esp8266-tutorial/
  * 
  * 
  * --- Commands ---
- * 
  * AT+RST—Restarts the Module
  * AT+GMR—Checks Version Information
  * AT+RESTORE—Restores the Factory Default Settings
@@ -40,32 +58,33 @@ char password[PASS_LEN];
 #define I2C_ADDRESS_ESP8266 8
 #define I2C_BUF_SIZE 32
 
-int ledPin = 12;
-WiFiServer server(80); //Service Port
+#define SERVER_PORT 80
+WiFiServer server(SERVER_PORT);
+
  
 void setup() {
-  Serial.begin(9600);
-  Serial.println("");
-  Serial.println("*** Program start ***");
-  Serial.println("");
+
+  /** Setup serial port if in use */
+  SerialBegin(9600);
+  SerialPrintln("");
+  SerialPrintln("*** Program start ***");
+  SerialPrintln("");
   delay(100);
 
-  Wire.begin(0,2); //Change to Wire.begin() for non ESP.
+  /** Setup I2C communication */
+  Wire.begin(0,2);  //Change to Wire.begin() for non ESP.
   sendI2cMessage("wifi=0");
-
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, LOW);
 
   /** Load credentials from persistent storage */
   if (loadCredentials()){
-    Serial.println("Loaded credentials from EEPROM");
+    SerialPrintln("Loaded credentials from EEPROM");
+
     if (connectWifi()){
       sendI2cMessage("wifi=1");
-      digitalWrite(ledPin, HIGH);
     }
   }
   else {
-    Serial.println("FAILED to load credentials. Setup needed.");
+    SerialPrintln("FAILED to load credentials. Setup needed.");
   }
 }
 
@@ -84,7 +103,7 @@ String receiveI2cMessage(){
   while (Wire.available())
   {
     delay(1);
-    s += Wire.read();
+    s += (char)Wire.read();
   }
   return s;
 }
@@ -95,65 +114,62 @@ void handleMessage(String msg){
   if (index != -1){
     String newSsid = msg.substring(index+5);
     newSsid.toCharArray(ssid, newSsid.length()+1);
-    Serial.print("New SSID: ");
-    Serial.println(ssid);
+    SerialPrint("New SSID: ");
+    SerialPrintln(ssid);
   }
   
   index = msg.indexOf("pass=");
   if (index != -1){
     String newPass = msg.substring(index+5);
     newPass.toCharArray(password, newPass.length()+1);
-    Serial.print("New password set: ********** ");
+    SerialPrintln("New password set: ********** ");
   }
 
   index = msg.indexOf("loadcfg");
   if (index != -1){
     if (loadCredentials()){
-      Serial.println("Loaded credentials from EEPROM");
+      SerialPrintln("Loaded credentials from EEPROM");
     }
     else{
-      Serial.println("FAILED to load credentials");
+      SerialPrintln("FAILED to load credentials");
     }
   }
 
   index = msg.indexOf("savecfg");
   if (index != -1){
     saveCredentials();
-    Serial.println("Saved credentials to EEPROM");
+    SerialPrintln("Saved credentials to EEPROM");
   }
 
   index = msg.indexOf("clearcfg");
   if (index != -1){
     clearCredentials();
-    Serial.println("Cleared credentials in EEPROM");
+    SerialPrintln("Cleared credentials in EEPROM");
   }
 
   index = msg.indexOf("reconnect");
   if (index != -1){
     disconnectWifi();
     sendI2cMessage("wifi=0");
-    digitalWrite(ledPin, LOW);
+
     if (connectWifi()){
       sendI2cMessage("wifi=1");
-      digitalWrite(ledPin, HIGH);
     }
   }
 
   index = msg.indexOf("ping");
   if (index != -1){
-    digitalWrite(ledPin, LOW);
     delay(100);
-    Serial.println("pong");
+    SerialPrintln("pong");
     sendI2cMessage("pong");
-    digitalWrite(ledPin, HIGH);
   }
 
   index = msg.indexOf("print");
   if (index != -1){
-    Serial.print("SSID: ");
-    Serial.println(ssid);
-    Serial.print("Password: ");
-    Serial.println(strlen(password)>0 ? "********" : "<no password>");
+    SerialPrint("SSID: ");
+    SerialPrintln(ssid);
+    SerialPrint("Password: ");
+    SerialPrintln(strlen(password)>0 ? "********" : "<no password>");
   }
 }
 
@@ -161,8 +177,8 @@ void handleMessage(String msg){
 void loop() {
   
   /** Read Arduino communication */
-  if(Serial.available()){
-    String msg = Serial.readStringUntil('\r');
+  if(SerialAvailable()){
+    String msg = SerialReadStringUntil('\r');
     handleMessage(msg);
   }
    
@@ -179,7 +195,6 @@ void loop() {
         request = request.substring(i+1,j-1);
         h = request.indexOf("h=");
         if (h != -1){
-          //Serial.println(request.substring(h+2));
           sendI2cMessage(request.substring(h+2));
         }
         else{
@@ -201,11 +216,9 @@ void loop() {
 bool checkWifiRequest(String &request){
 
   if (WiFi.status() != WL_CONNECTED){
-    digitalWrite(ledPin, LOW);
     if (!connectWifi()){
       return false;
     }
-    digitalWrite(ledPin, HIGH);
   }
 
   WiFiClient client = server.available();
@@ -242,30 +255,33 @@ bool connectWifi(){
   }
 
   // Connect to WiFi network
-  Serial.println("");
-  Serial.print("Connecting to ssid: ");
-  Serial.println(ssid);
+  SerialPrintln("");
+  SerialPrint("Connecting to ssid: ");
+  SerialPrintln(ssid);
   WiFi.begin(ssid, password);
 
   int i = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
+    SerialPrint(".");
+
     if (i++ == 10){
-      Serial.println("");
-      Serial.println("Failed to connect");
+      SerialPrintln("");
+      SerialPrintln("Failed to connect");
+
       return false;
     }
   }
 
-  Serial.println("");
-  Serial.println("Wifi connected");
+  SerialPrintln("");
+  SerialPrintln("Wifi connected");
    
   // Start the server
   server.begin();
-  Serial.println("Server started at http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/");
+  SerialPrintln("Server started at http://");
+  SerialPrint(WiFi.localIP());
+  SerialPrintln("/");
+
   return true;
 }
 

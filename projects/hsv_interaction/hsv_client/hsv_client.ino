@@ -10,22 +10,34 @@
 #include "colorLib.h"
 
 
+
+#define SERIAL_TX 10            // To RX  on ESP8266
+#define SERIAL_RX 11            // To TX  on ESP8266
+#define SERIAL_RESET 9          // To Res on ESP8266
+#define I2C_ADDRESS_ESP8266 8   // Address on i2c bus
+
 /*
  * Communication over Software Serial for setup and debugging 
  * This will mess up led stip stuff due to interupts
  */
-//#define USE_SOFTWARE_SERIAL 
+//#define USE_SOFTWARE_SERIAL 0
 #ifdef USE_SOFTWARE_SERIAL
   #include <SoftwareSerial.h>
-  #define SERIAL_TX 10      // To RX  on ESP8266
-  #define SERIAL_RX 11      // To TX  on ESP8266
-
   SoftwareSerial mySerial(SERIAL_RX, SERIAL_TX);
+  
+  #define SoftSerialAvailable()           mySerial.available()          
+  #define SoftSerialBegin(x)              mySerial.begin(x)
+  #define SoftSerialPrint(x)              mySerial.print(x)
+  #define SoftSerialReadStringUntil(x)    mySerial.readStringUntil(x)
+  #define SoftSerialSetTimeout(x)         mySerial.setTimeout(x);
+#else
+  #define SoftSerialAvailable()           false          
+  #define SoftSerialBegin(x)              
+  #define SoftSerialPrint(x)
+  #define SoftSerialReadStringUntil(x)    ""
+  #define SoftSerialSetTimeout(x)         
 #endif
 
-
-#define SERIAL_RESET 9          // To Res on ESP8266
-#define I2C_ADDRESS_ESP8266 8   // Address
 
 
 /* 
@@ -64,10 +76,12 @@ void setup() {
   Serial.setTimeout(50);
   Serial.println("Starting program");
   randomSeed(analogRead(0));
-  #ifdef USE_SOFTWARE_SERIAL
-    mySerial.begin(9600);
-    mySerial.setTimeout(50);
-  #endif
+
+  /** Setup software serial communication, if allowed */
+  pinMode(SERIAL_TX, OUTPUT);
+  pinMode(SERIAL_RX, INPUT_PULLUP);
+  SoftSerialBegin(9600);
+  SoftSerialSetTimeout(50);
 
   /** Join i2c bus on address #8 */
   Wire.begin(I2C_ADDRESS_ESP8266);
@@ -77,9 +91,15 @@ void setup() {
   strip.begin();
   strip.setBrightness(BRIGTHNESS);
   strip.show(); // Initialize all pixels to 'off'
-  
+
   targetHSV   = HSVClockRandom();
   targetPixel = random(strip.numPixels());
+
+  /** Reset ESP8266 */
+  //pinMode(SERIAL_RESET, OUTPUT);
+  //digitalWrite(ledPin, LOW);
+
+  delay(500);
 }
 
 
@@ -95,10 +115,9 @@ void loop() {
 /** If using SoftwareSerial */
 void handleSerialCommunication(){
 
-#ifdef USE_SOFTWARE_SERIAL
   /** Read ESP8266 output */
-  while (mySerial.available()) {
-    String msg = mySerial.readStringUntil('\r');
+  while (SoftSerialAvailable()) {
+    String msg = SoftSerialReadStringUntil('\r');
     if (msg.length() > 0){
       Serial.print(msg);
     }
@@ -108,9 +127,8 @@ void handleSerialCommunication(){
   if (Serial.available()){
     String msg = Serial.readStringUntil('\r') + '\r';
     Serial.readStringUntil('\n'); //read of everything else 
-    mySerial.print(msg);
+    SoftSerialPrint(msg);
   }
-#endif
 }
 
 /** Apply color magic */
