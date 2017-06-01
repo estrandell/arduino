@@ -5,7 +5,7 @@
 
 #include "colorLib.h"
 
-#define PIN 3
+#define PIN 6
 #define NUM_PIXELS 16
 uint16_t brightness = 40; 
 
