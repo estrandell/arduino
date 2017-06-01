@@ -13,7 +13,7 @@
 
 #define SERIAL_TX 10            // To RX  on ESP8266
 #define SERIAL_RX 11            // To TX  on ESP8266
-#define SERIAL_RESET 9          // To Res on ESP8266
+#define SERIAL_RESET 6          // To Res on ESP8266
 #define I2C_ADDRESS_ESP8266 8   // Address on i2c bus
 
 /*
@@ -54,6 +54,7 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, DATA_PIN, NEO_GRB + NEO_
 HSV      pixels[NUM_PIXELS];
 HSV      targetHSV;
 int16_t  targetPixel = 0;
+int      targetMode = 0;
 
 
 void receivedEsp8266Event(int howMany) {
@@ -63,10 +64,17 @@ void receivedEsp8266Event(int howMany) {
     //int x = Wire.read();    // receive byte as an integer
     s += (char)Wire.read();
   }
-  int h = s.toInt();
 
-  targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
-  targetPixel = random(strip.numPixels());
+  Serial.println(s);
+
+  if (s.indexOf("wifi=") != -1){
+    targetMode = s.substring(5).toInt();
+  }
+  else{
+    int h = s.toInt();
+    targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
+    targetPixel = random(strip.numPixels());
+  }
 }
 
 void setup() {
@@ -96,10 +104,12 @@ void setup() {
   targetPixel = random(strip.numPixels());
 
   /** Reset ESP8266 */
-  //pinMode(SERIAL_RESET, OUTPUT);
-  //digitalWrite(ledPin, LOW);
-
-  delay(500);
+  pinMode(SERIAL_RESET, OUTPUT);
+  digitalWrite(SERIAL_RESET, HIGH);
+  delay(100);
+  digitalWrite(SERIAL_RESET, LOW);
+  delay(100);
+  digitalWrite(SERIAL_RESET, HIGH);
 }
 
 
@@ -109,7 +119,10 @@ void loop() {
   handleSerialCommunication();
 
   /** Update pixels */
-  colorDropHSV(25);
+  switch(targetMode){
+    case 0: bluePulse(25);  break; // connecting
+    case 1: colorPulse(25); break; // normal mode
+  }
 }
 
 /** If using SoftwareSerial */
@@ -132,7 +145,7 @@ void handleSerialCommunication(){
 }
 
 /** Apply color magic */
-void colorDropHSV(uint8_t wait){
+void colorPulse(uint8_t wait){
 
     // set main color
     pixels[targetPixel] = LerpHSV(pixels[targetPixel], targetHSV, 0.05f);
@@ -162,4 +175,27 @@ void colorDropHSV(uint8_t wait){
     strip.show();
     delay(wait);
 }
+
+/** Blue-ish pulse for connection to wifi */
+void bluePulse(uint8_t wait){
+
+    static float rate = 0.05;
+    static float value = 0.5f;
+    static const HSV blue(.5f, 1.0f, 1.0f, 1.0f);
+
+    value += rate;
+    if (value <= 0.3f || value >= 1.0f){
+      rate = -rate;
+    }
+    
+    for (int i=0; i<NUM_PIXELS;i++){
+      pixels[i]   = blue;
+      pixels[i].v = Clamp01(value + rate);
+      strip.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+    }
+
+    strip.show();
+    delay(wait);
+}
+
 
