@@ -13,7 +13,18 @@ inline float Clamp01(float a){
 
 #define EPSILON 0.000001
 
-//static RGBA Hsv2Rgb(HSV & hsv);
+#define HSV_RED				HSV(         0, 1.0, 1.0, 1.0)
+#define HSV_ORANGE			HSV( 30/360.0f, 1.0, 1.0, 1.0)
+#define HSV_YELLOW			HSV( 60/360.0f, 1.0, 1.0, 1.0)
+#define HSV_YELLOW_GREEN	HSV( 90/360.0f, 1.0, 1.0, 1.0)
+#define HSV_GREEN			HSV(120/360.0f, 1.0, 1.0, 1.0)
+#define HSV_GREEN_CYAN		HSV(150/360.0f, 1.0, 1.0, 1.0)
+#define HSV_CYAN			HSV(180/360.0f, 1.0, 1.0, 1.0)
+#define HSV_BLUE_CYAN		HSV(210/360.0f, 1.0, 1.0, 1.0)
+#define HSV_BLUE			HSV(240/360.0f, 1.0, 1.0, 1.0)
+#define HSV_VIOLET			HSV(270/360.0f, 1.0, 1.0, 1.0)
+#define HSV_MAGENTA			HSV(300/360.0f, 1.0, 1.0, 1.0)
+#define HSV_RED_MAGENTA		HSV(330/360.0f, 1.0, 1.0, 1.0)
 
 
 struct Vec3
@@ -255,25 +266,5 @@ static HSV HSVClock(int hour){
 
 static HSV HSVClockRandom(){
 	return HSVClock(random(12));
-}
-
-static HSV HSVClockRandom(int hour, int sector){
-	return HSVClock((hour - sector + random(sector*2))%12);
-}
-
-
-static void TestColorLib(){
-
-  RGBA c0(255, 255, 255, 255);
-  Rgb2Hsv(c0).Print(); // [N/A, 0.0, 1.0]
-
-  RGBA c1(127, 127, 127, 255);
-  Rgb2Hsv(c1).Print(); // [N/A, 0.0, 0.5]
-
-  RGBA c2(0, 0, 0, 255);
-  Rgb2Hsv(c2).Print(); // [N/A, 0.0, 0.0]
-
-  RGBA c3(255, 0, 0, 255);
-  Rgb2Hsv(c3).Print(); // [0.0, 1.0, 1.0]
 }
 

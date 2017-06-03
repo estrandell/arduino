@@ -7,6 +7,7 @@
  
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
 #include <Wire.h>
 
 /**
@@ -14,8 +15,8 @@
  * As such we send data over the I2C bus, and may skip the serial com for performance.
  */
 
-#define USE_SERIAL 1
-#if USE_SERIAL == 1
+#define USE_SERIAL
+#ifdef USE_SERIAL
   #define SerialAvailable()         Serial.available()
   #define SerialBegin(x)            Serial.begin(x)
   #define SerialPrint(x)            Serial.print(x)
@@ -55,13 +56,14 @@
 char ssid[SSID_LEN];
 char password[PASS_LEN];
 
-#define I2C_ADDRESS_ESP8266 8
+#define I2C_ADDRESS 8
 #define I2C_BUF_SIZE 32
 
 #define SERVER_PORT 80
 WiFiServer server(SERVER_PORT);
 
- 
+
+
 void setup() {
 
   /** Setup serial port if in use */
@@ -92,21 +94,21 @@ void sendI2cMessage(String message){
   static char buf[I2C_BUF_SIZE];
   message.toCharArray(buf, message.length()+1);
   
-  Wire.beginTransmission(I2C_ADDRESS_ESP8266);
+  Wire.beginTransmission(I2C_ADDRESS);
   Wire.write(buf);
   Wire.endTransmission();
 }
 
-String receiveI2cMessage(){
+String requestI2cMessage(){
+
   String s = "";  
-  Wire.requestFrom(I2C_ADDRESS_ESP8266,10);
-  while (Wire.available())
-  {
-    delay(1);
+  Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
+  while (Wire.available()){
     s += (char)Wire.read();
   }
   return s;
 }
+ 
 
 void handleMessage(String msg){
 
@@ -176,26 +178,45 @@ void handleMessage(String msg){
 
 void loop() {
   
-  /** Read Arduino communication */
+  /** Check for serial communication */
   if(SerialAvailable()){
     String msg = SerialReadStringUntil('\r');
     handleMessage(msg);
+  }
+
+  /** Check for I2C messages */
+  String msg = requestI2cMessage();
+  if (msg.length() > 0){
+    sendI2cMessage("s: " +msg.substring(0,10));
   }
    
   /** Read request from wifi */
   String request;
   if (checkWifiRequest(request)){
+    if (request.indexOf("favicon.ico") == -1){
 
-    // Interpret message
-    int i = request.indexOf("/");
-    int j = request.indexOf("HTTP/");
-    int h;
-    if (i != -1 && j != -1){
-      if (request.indexOf("favicon.ico") == -1){
+      int i = request.indexOf("/");
+      int j = request.indexOf("HTTP/");
+      if (i != -1 && j != -1){
         request = request.substring(i+1,j-1);
-        h = request.indexOf("h=");
-        if (h != -1){
-          sendI2cMessage(request.substring(h+2));
+        if (request.startsWith("h=")){
+          //sendI2cMessage(request);
+
+        
+          String s    = "http://192.168.1.120/h=";
+          s          += request.substring(2).toInt();        
+
+          HTTPClient http;
+          http.begin(s);
+          int httpCode = http.GET();
+          if (httpCode > 0) {
+            String payload = http.getString();
+            Serial.println(payload);
+          }
+          else {
+            Serial.println("payload size is zero");
+          }
+          http.end();   //Close connection        
         }
         else{
           handleMessage(request);
@@ -204,7 +225,7 @@ void loop() {
     }
   }
 
-  delay(1);
+  delay(50);
 }
 
 /** Check if Wifi is up and running
@@ -246,7 +267,6 @@ bool checkWifiRequest(String &request){
     return true;
   return false;
 }
-
 
 /** Connect to wifi */
 bool connectWifi(){

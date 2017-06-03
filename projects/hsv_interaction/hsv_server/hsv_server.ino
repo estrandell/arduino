@@ -21,7 +21,8 @@ enum WifiState{
 #define SERIAL_TX 10            // To RX  on ESP8266
 #define SERIAL_RX 11            // To TX  on ESP8266
 #define SERIAL_RESET 6          // To Res on ESP8266
-#define I2C_ADDRESS_ESP8266 8   // Address on i2c bus
+#define I2C_ADDRESS 8           // Address on i2c bus
+#define I2C_BUF_SIZE 32
 
 /*
  * Communication over Software Serial for ESP8266 setup and debugging 
@@ -53,7 +54,7 @@ enum WifiState{
  * and minimize distance between Arduino and first pixel.  Avoid connecting
  * on a live circuit...if you must, connect GND first.
  */
-#define DATA_PIN 2
+#define DATA_PIN 12
 #define NUM_PIXELS 16
 #define BRIGTHNESS 40 
 
@@ -64,8 +65,9 @@ int16_t       targetPixel = 0;
 WifiState     wifiState = WIFI_INIT;
 unsigned long wifiCmdTime = 0; 
 unsigned long wifiTimeout = 30000;
+unsigned long lastRequest = 0;
 
-void receivedEsp8266Event(int howMany) {
+void onI2cReceived(int howMany) {
   String str = "";
   while (Wire.available()) {
     str += (char)Wire.read();
@@ -73,17 +75,30 @@ void receivedEsp8266Event(int howMany) {
 
   if (str.length() > 0){
     wifiCmdTime = millis();
-    
-    if (str.indexOf("wifi=") != -1){
+
+    if (str.startsWith("wifi=")){
       int state = str.substring(5).toInt();
       wifiState = (state == 0 ? WIFI_CONNECTING : WIFI_WAITING);
     }
-    else{
-      int h = str.toInt();
+    else if (str.startsWith("h=")){
+      int h       = str.substring(2).toInt();
       targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
       targetPixel = random(strip.numPixels());
       wifiState   = WIFI_CONNECTED;
     }
+  }
+}
+
+void onI2cRequest() {
+  static char buf[I2C_BUF_SIZE];
+
+  if (lastRequest + 3000 > millis()){
+    String s = "http://192.168.1.120/h=";
+    s+= (int)(targetHSV.h*360);
+    s.toCharArray(buf, s.length()+1);
+    Wire.write(buf,I2C_BUF_SIZE);
+    Serial.println(s);
+    lastRequest = millis();
   }
 }
 
@@ -102,8 +117,9 @@ void setup() {
   SoftSerialSetTimeout(50);
 
   /** Join i2c bus on address #8 */
-  Wire.begin(I2C_ADDRESS_ESP8266);
-  Wire.onReceive(receivedEsp8266Event);
+  Wire.begin(I2C_ADDRESS);
+  Wire.onReceive(onI2cReceived);
+  Wire.onRequest(onI2cRequest);
 
   /** Init led strip */
   strip.begin();
@@ -131,12 +147,14 @@ void loop() {
   }
 
   /** Update pixels */
+  /*
   switch(wifiState){
     case WIFI_INIT:       pulse(HSV_RED, 25);     break;
     case WIFI_CONNECTING: pulse(HSV_ORANGE,25);   break;
     case WIFI_WAITING:    pulse(HSV_YELLOW,25);   break;
     case WIFI_CONNECTED:  pixelChase(25);         break;
   }
+  */
 }
 
 /** If using SoftwareSerial */
@@ -201,11 +219,11 @@ void pixelChase(uint8_t wait){
 /** Blue-ish pulse for connection to wifi */
 void pulse(const HSV &hsv, uint8_t wait){
 
-    static float rate = 0.01;
+    static float rate = 0.05;
     static float value = 0.5f;
 
     value += rate;
-    if (value <= 0.3f || value >= 0.7f){
+    if (value <= 0.3f || value >= 1.0f){
       rate = -rate;
     }
     
