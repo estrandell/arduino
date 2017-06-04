@@ -57,6 +57,7 @@
 char ssid[SSID_LEN];
 char password[PASS_LEN];
 
+
 #define I2C_ADDRESS 8
 #define I2C_BUF_SIZE 32
 
@@ -165,41 +166,37 @@ void loop() {
   }
 
   /** Check for I2C messages */
-  String msg = requestI2cMessage();
-  if (msg.length() > 0){
-    sendI2cMessage("s: " +msg.substring(0,10));
+  String i2cRequest = getI2cRequest();
+  if (i2cRequest.length() > 0){
+    sendHttpGetRequest(i2cRequest);
   }
    
   /** Read request from wifi */
   String request;
-  if (getClientRequests(request)){
-    if (request.indexOf("favicon.ico") == -1){
-
-      int i = request.indexOf("/");
-      int j = request.indexOf("HTTP/");
-      if (i != -1 && j != -1){
-        request = request.substring(i+1,j-1);
-        if (request.startsWith("h=")){
-          //sendI2cMessage(request);
-
-          String s    = "http://192.168.1.120/h=";
-          s          += request.substring(2).toInt();        
-          getRemote(s);
-        }
-        else{
-          handleMessage(request);
-        }
-      }
+  if (getLocalHttpRequest(request)){
+    if (request.startsWith("h=")){
+      // send to arduino
+      sendI2cMessage(request);
+    }
+    else if (request.startsWith("r=")){
+      // send on network
+      String url = request.substring(2);
+      sendHttpGetRequest(url);
+    }
+    else{
+      // handle internally
+      handleMessage(request);
     }
   }
 
   delay(50);
 }
 
-
-/** I2C: Send data to slave node */
+/** I2C Master: Send data to slave node */
 void sendI2cMessage(String message){
   static char buf[I2C_BUF_SIZE];
+  memset(buf, 0, I2C_BUF_SIZE);
+  
   message.toCharArray(buf, message.length()+1);
   
   Wire.beginTransmission(I2C_ADDRESS);
@@ -207,19 +204,23 @@ void sendI2cMessage(String message){
   Wire.endTransmission();
 }
 
-/** I2C: Request data from slave node */
-String requestI2cMessage(){
-
-  String s = "";  
+/** I2C Master: Request data from slave node */
+String getI2cRequest(){
+  String s = "";
   Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
   while (Wire.available()){
-    s += (char)Wire.read();
+    // check valid ascii values 
+    // https://www.arduino.cc/en/Reference/ASCIIchart
+    char c = (char)Wire.read();
+    if (c>32 && c <127){
+      s += c;
+    }
   }
   return s;
 }
  
 /** HTTP: connect to remote HTTP server */
-void getRemote(String url){
+void sendHttpGetRequest(String url){
   HTTPClient http;
   http.begin(url);
   int httpCode = http.GET(); // zero is OK!
@@ -227,7 +228,7 @@ void getRemote(String url){
 }
 
 /** HTTP: Check for HTTP requests */
-bool getClientRequests(String &request){
+bool getLocalHttpRequest(String &request){
 
   if (WiFi.status() != WL_CONNECTED){
     if (!connectWifi()){
@@ -256,8 +257,19 @@ bool getClientRequests(String &request){
   // Write response
   client.println("HTTP/1.1 200 OK");
 
-  if (request.length() >0)
-    return true;
+  // Clean request
+  if (request.indexOf("favicon.ico") == -1){
+    int i = request.indexOf("/");
+    int j = request.indexOf("HTTP/");
+    if (i != -1 && j != -1){
+      request = request.substring(i+1,j-1);
+      if (request.length() >0){
+        return true;
+      }
+    }
+  }
+  
+  request = "";
   return false;
 }
 

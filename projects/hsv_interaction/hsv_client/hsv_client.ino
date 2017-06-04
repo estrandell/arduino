@@ -21,7 +21,7 @@ enum WifiState{
 #define SERIAL_TX 10            // To RX  on ESP8266
 #define SERIAL_RX 11            // To TX  on ESP8266
 #define SERIAL_RESET 6          // To Res on ESP8266
-#define I2C_ADDRESS_ESP8266 8   // Address on i2c bus
+#define I2C_ADDRESS 8           // Address on i2c bus
 
 /*
  * Communication over Software Serial for ESP8266 setup and debugging 
@@ -64,28 +64,8 @@ int16_t       targetPixel = 0;
 WifiState     wifiState = WIFI_INIT;
 unsigned long wifiCmdTime = 0; 
 unsigned long wifiTimeout = 30000;
+unsigned long lastRequest = 0;
 
-void receivedEsp8266Event(int howMany) {
-  String str = "";
-  while (Wire.available()) {
-    str += (char)Wire.read();
-  }
-
-  if (str.length() > 0){
-    wifiCmdTime = millis();
-    
-    if (str.indexOf("wifi=") != -1){
-      int state = str.substring(5).toInt();
-      wifiState = (state == 0 ? WIFI_CONNECTING : WIFI_WAITING);
-    }
-    else{
-      int h = str.toInt();
-      targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
-      targetPixel = random(strip.numPixels());
-      wifiState   = WIFI_CONNECTED;
-    }
-  }
-}
 
 void setup() {
   
@@ -102,8 +82,9 @@ void setup() {
   SoftSerialSetTimeout(50);
 
   /** Join i2c bus on address #8 */
-  Wire.begin(I2C_ADDRESS_ESP8266);
-  Wire.onReceive(receivedEsp8266Event);
+  Wire.begin(I2C_ADDRESS);
+  Wire.onReceive(onI2cReceived);
+  Wire.onRequest(onI2cRequest);
 
   /** Init led strip */
   strip.begin();
@@ -139,7 +120,35 @@ void loop() {
   }
 }
 
-/** If using SoftwareSerial */
+
+void onI2cReceived(int howMany) {
+  String str = "";
+  while (Wire.available()) {
+    str += (char)Wire.read();
+  }
+
+  if (str.length() > 0){
+    wifiCmdTime = millis();
+    
+    if (str.indexOf("wifi=") != -1){
+      int state = str.substring(5).toInt();
+      wifiState = (state == 0 ? WIFI_CONNECTING : WIFI_WAITING);
+    }
+    else{
+      int h = str.toInt();
+      targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
+      targetPixel = random(strip.numPixels());
+      wifiState   = WIFI_CONNECTED;
+    }
+  }
+}
+
+/** I2C Slave: On request, send data to master (esp8266) */
+void onI2cRequest() {
+  // do nothing
+}
+
+/** SoftwareSerial: Handle SoftwareSerial <> Serial communication */
 void handleSerialCommunication(){
 
   /** Read ESP8266 output */
@@ -158,7 +167,7 @@ void handleSerialCommunication(){
   }
 }
 
-/** Reset ESP8266 module */
+/** ESP8266: Hard reset circut */
 void resetWifi(){
   wifiState = WIFI_INIT;
   digitalWrite(SERIAL_RESET, LOW);
@@ -166,7 +175,7 @@ void resetWifi(){
   digitalWrite(SERIAL_RESET, HIGH);
 }
 
-/** Apply color magic */
+/** WS2812: Apply color magic */
 void pixelChase(uint8_t wait){
 
     // set main color
@@ -198,7 +207,7 @@ void pixelChase(uint8_t wait){
     delay(wait);
 }
 
-/** Blue-ish pulse for connection to wifi */
+/** WS2812: Create a pulse effect */
 void pulse(const HSV &hsv, uint8_t wait){
 
     static float rate = 0.01;
