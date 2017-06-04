@@ -10,6 +10,7 @@
 #include <ESP8266HTTPClient.h>
 #include <Wire.h>
 
+
 /**
  * Interrupts caused by SoftwareSerial disturbs the WS2812 update cycle on the Arduino.
  * As such we send data over the I2C bus, and may skip the serial com for performance.
@@ -74,7 +75,7 @@ void setup() {
   delay(100);
 
   /** Setup I2C communication */
-  Wire.begin(0,2);  //Change to Wire.begin() for non ESP.
+  Wire.begin(0,2);
   sendI2cMessage("wifi=0");
 
   /** Load credentials from persistent storage */
@@ -89,26 +90,6 @@ void setup() {
     SerialPrintln("FAILED to load credentials. Setup needed.");
   }
 }
-
-void sendI2cMessage(String message){
-  static char buf[I2C_BUF_SIZE];
-  message.toCharArray(buf, message.length()+1);
-  
-  Wire.beginTransmission(I2C_ADDRESS);
-  Wire.write(buf);
-  Wire.endTransmission();
-}
-
-String requestI2cMessage(){
-
-  String s = "";  
-  Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
-  while (Wire.available()){
-    s += (char)Wire.read();
-  }
-  return s;
-}
- 
 
 void handleMessage(String msg){
 
@@ -175,7 +156,6 @@ void handleMessage(String msg){
   }
 }
 
-
 void loop() {
   
   /** Check for serial communication */
@@ -192,7 +172,7 @@ void loop() {
    
   /** Read request from wifi */
   String request;
-  if (checkWifiRequest(request)){
+  if (getClientRequests(request)){
     if (request.indexOf("favicon.ico") == -1){
 
       int i = request.indexOf("/");
@@ -202,21 +182,9 @@ void loop() {
         if (request.startsWith("h=")){
           //sendI2cMessage(request);
 
-        
           String s    = "http://192.168.1.120/h=";
           s          += request.substring(2).toInt();        
-
-          HTTPClient http;
-          http.begin(s);
-          int httpCode = http.GET();
-          if (httpCode > 0) {
-            String payload = http.getString();
-            Serial.println(payload);
-          }
-          else {
-            Serial.println("payload size is zero");
-          }
-          http.end();   //Close connection        
+          getRemote(s);
         }
         else{
           handleMessage(request);
@@ -228,13 +196,38 @@ void loop() {
   delay(50);
 }
 
-/** Check if Wifi is up and running
- *  Check if a client has connected
- *  Wait for client to sends some data 
- *  
- *  returns true if all is good and request is populated
- */
-bool checkWifiRequest(String &request){
+
+/** I2C: Send data to slave node */
+void sendI2cMessage(String message){
+  static char buf[I2C_BUF_SIZE];
+  message.toCharArray(buf, message.length()+1);
+  
+  Wire.beginTransmission(I2C_ADDRESS);
+  Wire.write(buf);
+  Wire.endTransmission();
+}
+
+/** I2C: Request data from slave node */
+String requestI2cMessage(){
+
+  String s = "";  
+  Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
+  while (Wire.available()){
+    s += (char)Wire.read();
+  }
+  return s;
+}
+ 
+/** HTTP: connect to remote HTTP server */
+void getRemote(String url){
+  HTTPClient http;
+  http.begin(url);
+  int httpCode = http.GET(); // zero is OK!
+  http.end(); 
+}
+
+/** HTTP: Check for HTTP requests */
+bool getClientRequests(String &request){
 
   if (WiFi.status() != WL_CONNECTED){
     if (!connectWifi()){
@@ -268,7 +261,7 @@ bool checkWifiRequest(String &request){
   return false;
 }
 
-/** Connect to wifi */
+/** WIFI: Connect to network */
 bool connectWifi(){
   if (WiFi.status() == WL_CONNECTED){
     disconnectWifi();
@@ -305,13 +298,13 @@ bool connectWifi(){
   return true;
 }
 
-/** Disconnect from current wifi */
+/** WIFI: Disconnect from current network */
 void disconnectWifi(){
   server.stop();
   WiFi.disconnect();
 }
 
-/** Load WLAN credentials from EEPROM */
+/** EEPROM: Load credentials */
 bool loadCredentials() {
   char ok[2+1];
   EEPROM.begin(EEPROM_LEN);
@@ -329,7 +322,7 @@ bool loadCredentials() {
   }
 }
 
-/** Store WLAN credentials to EEPROM */
+/** EEPROM: Store credentials */
 void saveCredentials() {
   char ok[2+1] = "OK";
   EEPROM.begin(EEPROM_LEN);
@@ -340,7 +333,7 @@ void saveCredentials() {
   EEPROM.end();
 }
 
-/** Clear WLAN credentials on EEPROM */
+/** EEPROM: Clear credentials */
 void clearCredentials(){
   EEPROM.begin(EEPROM_LEN);
   for (int i = 0 ; i < EEPROM_LEN ; i++) {
