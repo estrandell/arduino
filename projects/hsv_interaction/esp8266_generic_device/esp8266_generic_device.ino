@@ -59,7 +59,9 @@ char password[PASS_LEN];
 
 
 #define I2C_ADDRESS 8
-#define I2C_BUF_SIZE 32
+#define I2C_BUF_SIZE 4
+char i2cBuffer[I2C_BUF_SIZE];
+unsigned long i2cLastRequestTime = 0;
 
 #define SERVER_PORT 80
 WiFiServer server(SERVER_PORT);
@@ -76,15 +78,15 @@ void setup() {
   delay(100);
 
   /** Setup I2C communication */
-  Wire.begin(0,2);
-  sendI2cMessage("wifi=0");
+  Wire.begin(0, 2);       
+  sendI2cMessage("w=0");
 
   /** Load credentials from persistent storage */
   if (loadCredentials()){
     SerialPrintln("Loaded credentials from EEPROM");
 
     if (connectWifi()){
-      sendI2cMessage("wifi=1");
+      sendI2cMessage("w=1");
     }
   }
   else {
@@ -134,18 +136,11 @@ void handleMessage(String msg){
   index = msg.indexOf("reconnect");
   if (index != -1){
     disconnectWifi();
-    sendI2cMessage("wifi=0");
+    sendI2cMessage("w=0");
 
     if (connectWifi()){
-      sendI2cMessage("wifi=1");
+      sendI2cMessage("w=1");
     }
-  }
-
-  index = msg.indexOf("ping");
-  if (index != -1){
-    delay(100);
-    SerialPrintln("pong");
-    sendI2cMessage("pong");
   }
 
   index = msg.indexOf("print");
@@ -168,6 +163,7 @@ void loop() {
   /** Check for I2C messages */
   String i2cRequest = getI2cRequest();
   if (i2cRequest.length() > 0){
+    String url = "http://192.168.1.120/h=" + i2cRequest;
     sendHttpGetRequest(i2cRequest);
   }
    
@@ -176,9 +172,10 @@ void loop() {
   if (getLocalHttpRequest(request)){
     if (request.startsWith("h=")){
       // send to arduino
-      sendI2cMessage(request);
+      String h = request.substring(2);
+      sendI2cMessage(h);
     }
-    else if (request.startsWith("r=")){
+    else if (request.startsWith("r=")){   
       // send on network
       String url = request.substring(2);
       sendHttpGetRequest(url);
@@ -193,15 +190,14 @@ void loop() {
 }
 
 /** I2C Master: Send data to slave node */
-void sendI2cMessage(String message){
-  static char buf[I2C_BUF_SIZE];
-  memset(buf, 0, I2C_BUF_SIZE);
-  
-  message.toCharArray(buf, message.length()+1);
+int sendI2cMessage(String message){
+
+  memset(i2cBuffer, 0, I2C_BUF_SIZE);  
+  message.toCharArray(i2cBuffer, message.length()+1);
   
   Wire.beginTransmission(I2C_ADDRESS);
-  Wire.write(buf);
-  Wire.endTransmission();
+  Wire.write(i2cBuffer);
+  return Wire.endTransmission();
 }
 
 /** I2C Master: Request data from slave node */
@@ -248,6 +244,7 @@ bool getLocalHttpRequest(String &request){
       return false;
     delay(1);
   }
+
 
   // Read the first line of the request
   request = client.readStringUntil('\r');
@@ -354,4 +351,5 @@ void clearCredentials(){
   EEPROM.commit();
   EEPROM.end();
 }
+
 
