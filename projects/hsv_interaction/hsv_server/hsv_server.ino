@@ -12,18 +12,31 @@
 
 enum WifiState{
   WIFI_INIT = 0,
-  WIFI_CONNECTING,    // connecting to wifi
-  WIFI_WAITING,       // waiting for instructions
-  WIFI_CONNECTED      // connected and instructed
+  WIFI_DISCONNECTED,  // connecting to wifi
+  WIFI_CONNECTED,     // connected and instructed
 };
 
+
+//#define IS_HOST 
+#ifdef IS_HOST
+  /** Run as app host */
+  #define DATA_PIN_0 12
+  #define DATA_PIN_1 11
+  #define NUM_PIXELS 16
+  #define BRIGTHNESS 40 
+#else
+  /** Run as app client */
+  #define DATA_PIN_0 2
+  #define DATA_PIN_1 3
+  #define NUM_PIXELS 60
+  #define BRIGTHNESS 40 
+#endif
 
 #define SERIAL_TX 10            // To RX  on ESP8266
 #define SERIAL_RX 11            // To TX  on ESP8266
 #define SERIAL_RESET 6          // To Res on ESP8266
 #define I2C_ADDRESS 8           // Address on i2c bus
-#define I2C_BUF_SIZE 4
-char i2cBuffer[I2C_BUF_SIZE];
+#define I2C_BUF_SIZE 4          // Buffer size for i2c messages
 
 /*
  * Communication over Software Serial for ESP8266 setup and debugging 
@@ -55,18 +68,17 @@ char i2cBuffer[I2C_BUF_SIZE];
  * and minimize distance between Arduino and first pixel.  Avoid connecting
  * on a live circuit...if you must, connect GND first.
  */
-#define DATA_PIN 12
-#define NUM_PIXELS 16
-#define BRIGTHNESS 40 
-
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, DATA_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip0 = Adafruit_NeoPixel(NUM_PIXELS, DATA_PIN_0, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip1 = Adafruit_NeoPixel(NUM_PIXELS, DATA_PIN_1, NEO_GRB + NEO_KHZ800);
 HSV           pixels[NUM_PIXELS];
 HSV           targetHSV;
 int16_t       targetPixel = 0;
-WifiState     wifiState = WIFI_INIT;
-unsigned long wifiCmdTime = 0; 
-unsigned long wifiTimeout = 30000;
-unsigned long lastRequest = 0;
+HSV           nextHSV;
+bool          getNextHsv = false;
+unsigned long getNextHsvTime = 0;
+
+WifiState     wifiState   = WIFI_INIT;
+unsigned long i2cHeartbeat = 0;
 
 
 void setup() {
@@ -90,12 +102,15 @@ void setup() {
   Wire.onRequest(onI2cRequest);
 
   /** Init led strip */
-  strip.begin();
-  strip.setBrightness(BRIGTHNESS);
-  strip.show(); // Initialize all pixels to 'off'
+  strip0.begin();
+  strip0.setBrightness(BRIGTHNESS);
+  strip0.show(); // Initialize all pixels to 'off'
+  strip1.begin();
+  strip1.setBrightness(BRIGTHNESS);
+  strip1.show(); // Initialize all pixels to 'off'
 
   targetHSV   = HSVClockRandom();
-  targetPixel = random(strip.numPixels());
+  targetPixel = random(strip0.numPixels());
 
   /** Reset ESP8266 */
   pinMode(SERIAL_RESET, OUTPUT);
@@ -109,11 +124,8 @@ void loop() {
   /** If using SoftwareSerial */
   handleSerialCommunication();
 
-  static int kkk = 0;
-  if (kkk++ % 1000)
-    Serial.println(wifiCmdTime);
-
-  if (wifiCmdTime + 3000 < millis()){ //5sec
+  /** If I2C conncetion is dead, try to clear bus */
+  if (i2cHeartbeat + 5000 < millis()){ //30sec
     Serial.println("resetting ");
     I2C_ClearBus();
     Wire.begin();
@@ -122,55 +134,75 @@ void loop() {
   }
 
   /** Is connection active */
-  if (wifiState == WIFI_CONNECTED && wifiCmdTime + wifiTimeout < millis()){ //5sec
-    wifiState = WIFI_WAITING;
-  }
+  //if (wifiState == WIFI_CONNECTED && i2cHeartbeat + 1000 < millis()){ //5sec
+  //  wifiState = WIFI_DISCONNECTED;
+  //}
 
   /** Update pixels */
   switch(wifiState){
-    case WIFI_INIT:       pulse(HSV_RED, 25);     break;
-    case WIFI_CONNECTING: pulse(HSV_ORANGE,25);   break;
-    case WIFI_WAITING:    pulse(HSV_YELLOW,25);   break;
-    case WIFI_CONNECTED:  pixelChase(25);         break;
+    case WIFI_INIT:         pulse(HSV_RED, 25);     break;
+    case WIFI_DISCONNECTED: pulse(HSV_GREEN,25);    break;
+    case WIFI_CONNECTED:    pixelChase(25);         break;
   }
 }
 
 /** I2C Slave: Handle data send by i2c master */
 void onI2cReceived(int howMany) {
-  String str = "";
+
+  static uint8_t buf[I2C_BUF_SIZE];
+  memset(buf, 0, I2C_BUF_SIZE);
+
+  int i = 0;
   while (Wire.available()) {
-    str += (char)Wire.read();
+    buf[i++] = (byte)Wire.read();
   }
 
-  if (str.length() > 0){
-    wifiCmdTime = millis();
+  if (i == I2C_BUF_SIZE){
+    
+    int value = (buf[1] << 8) | buf[2];
+    if (buf[0] == 1){
+        Serial.print("wifi: ");
+        Serial.println(value);
+        wifiState = (value == 0 ? WIFI_DISCONNECTED : WIFI_CONNECTED);
+    }
+    if (buf[0] == 2){
+        int h = (buf[1] << 8) | buf[2];
+        Serial.print("hsv: ");
+        Serial.println(value);
 
-    if (str.startsWith("w=")){
-      int state = str.substring(2).toInt();
-      wifiState = (state == 0 ? WIFI_CONNECTING : WIFI_WAITING);
-    }
-    else if (str.startsWith("h=")){
-      int h       = str.substring(2).toInt();
-      targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
-      targetPixel = random(strip.numPixels());
-      wifiState   = WIFI_CONNECTED;
-    }
+        nextHSV = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
+        getNextHsv = true;
+        getNextHsvTime = millis();
+    }  
+  
+    i2cHeartbeat = millis();
   }
 }
 
 /** I2C Slave: On request, send data to master (esp8266) */
 void onI2cRequest() {
-  
-  if (lastRequest + 500 < millis()){
-    memset(i2cBuffer, 0, I2C_BUF_SIZE);
-    String s = "";
-    s += (int)(targetHSV.h*360);
-    s.toCharArray(i2cBuffer, s.length()+1);
-    Wire.write(i2cBuffer, I2C_BUF_SIZE);
 
-    lastRequest = millis();
-    wifiCmdTime = millis();
+  static unsigned long lastI2cSent = 0;
+  static uint8_t buffer[I2C_BUF_SIZE];
+  memset(buffer, 0, I2C_BUF_SIZE);
+
+#ifdef IS_HOST
+  if (lastI2cSent + 200 < millis())
+  {
+    uint8_t addr = (uint8_t)120;
+    int hval = (int)(HSVClockRandom().h*360); //(int)(targetHSV.h*360);  
+    
+    buffer[0] = 1; // data available
+    buffer[1] = addr;
+    buffer[2] = hval >> 8;
+    buffer[3] = hval & 0xFF;
+
+    lastI2cSent = millis();
   }
+#endif
+
+  i2cHeartbeat = millis();
+  Wire.write(buffer, I2C_BUF_SIZE);
 }
 
 /** SoftwareSerial: Handle SoftwareSerial <> Serial communication */
@@ -203,6 +235,43 @@ void resetWifi(){
 /** WS2812: Apply color magic */
 void pixelChase(uint8_t wait){
 
+    static const float rise     = 0.05f; 
+    static const float growth   = 0.3f; 
+    static const float decay    = 0.01f;
+
+    // set main color
+    pixels[targetPixel]   = LerpHSV(pixels[targetPixel], targetHSV, rise);
+
+    for (int i=targetPixel-1; i>=0; i--){
+      pixels[i]   = LerpHSV(pixels[i], pixels[i+1], growth);
+      pixels[i].v = Clamp01(pixels[i].v - decay);
+    }
+    for (int i=targetPixel+1; i<NUM_PIXELS; i++){
+      pixels[i]   = LerpHSV(pixels[i], pixels[i-1], growth);
+      pixels[i].v = Clamp01(pixels[i].v - decay);
+    }
+
+    for (int i=0; i<NUM_PIXELS; i++){
+      strip0.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+      strip1.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+    }
+
+    if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
+      if(getNextHsv){
+        targetHSV   = (getNextHsv ? nextHSV : HSVClockRandom());
+        targetPixel = random(NUM_PIXELS);
+        getNextHsv = false;
+      }
+    }
+
+    strip0.show();
+    strip1.show();
+    delay(wait);
+}
+
+
+void pixelChaseRing(uint8_t wait){
+
     // set main color
     pixels[targetPixel] = LerpHSV(pixels[targetPixel], targetHSV, 0.05f);
 
@@ -220,17 +289,21 @@ void pixelChase(uint8_t wait){
         pixels[i].v = Clamp01(pixels[i].v - 0.01);
       }
 
-      strip.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+      strip0.setPixelColor(                i, pixels[i].ToRgb().ToUInt32());
+      strip1.setPixelColor(numPixels - 1 - i, pixels[i].ToRgb().ToUInt32());
 
       if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
-        targetHSV   = HSVClockRandom();
+        targetHSV   = (getNextHsv ? nextHSV : HSVClockRandom());
         targetPixel = random(numPixels);
+        getNextHsv = false;
       }
     }
 
-    strip.show();
+    strip0.show();
+    strip1.show();
     delay(wait);
 }
+
 
 /** WS2812: Create a pulse effect */
 void pulse(const HSV &hsv, uint8_t wait){
@@ -246,16 +319,16 @@ void pulse(const HSV &hsv, uint8_t wait){
     for (int i=0; i<NUM_PIXELS;i++){
       pixels[i]   = hsv;
       pixels[i].v = Clamp01(value + rate);
-      strip.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+      strip0.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+      strip1.setPixelColor(i, pixels[i].ToRgb().ToUInt32());
     }
 
-    strip.show();
+    strip0.show();
+    strip1.show();
     delay(wait);
 }
 
-
-
-/**
+/** I2C: Clear bus
  * SOURCE: http://www.forward.com.au/pfod/ArduinoProgramming/I2C_ClearBus/index.html
  * This routine turns off the I2C bus and clears it
  * on return SCA and SCL pins are tri-state inputs.
@@ -267,7 +340,6 @@ void pulse(const HSV &hsv, uint8_t wait){
  *         2 if SDA held low by slave clock stretch for > 2sec
  *         3 if SDA held low after 20 clocks.
  */
- 
 int I2C_ClearBus() {
 #if defined(TWCR) && defined(TWEN)
   TWCR &= ~(_BV(TWEN)); //Disable the Atmel 2-Wire interface so we can control the SDA and SCL pins directly

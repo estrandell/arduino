@@ -3,6 +3,7 @@
  * 
  * Copyright (c) 2017 Ebbe Strandell
  * https://github.com/estrandell/arduino
+ * 
  */
  
 #include <EEPROM.h>
@@ -16,7 +17,7 @@
  * As such we send data over the I2C bus, and may skip the serial com for performance.
  */
 
-#define USE_SERIAL
+//#define USE_SERIAL
 #ifdef USE_SERIAL
   #define SerialAvailable()         Serial.available()
   #define SerialBegin(x)            Serial.begin(x)
@@ -58,14 +59,28 @@ char ssid[SSID_LEN];
 char password[PASS_LEN];
 
 
+/**
+ * Protocol:
+ * ESP <> Server
+ * > wifi status
+ * < target color
+ * < target address
+ * 
+ * ESP <> Client
+ * > wifi status
+ * > target color
+ */
+ enum I2C_MSG_TYPE{
+  I2C_UNKNOWN = 0,
+  I2C_WIFI_STATUS,
+  I2C_HSV
+ };
+
 #define I2C_ADDRESS 8
 #define I2C_BUF_SIZE 4
-char i2cBuffer[I2C_BUF_SIZE];
-unsigned long i2cLastRequestTime = 0;
 
 #define SERVER_PORT 80
 WiFiServer server(SERVER_PORT);
-
 
 
 void setup() {
@@ -78,20 +93,79 @@ void setup() {
   delay(100);
 
   /** Setup I2C communication */
-  Wire.begin(0, 2);       
-  sendI2cMessage("w=0");
+  Wire.begin(0, 2);
+  sendI2cMessage(I2C_WIFI_STATUS, 0);
 
   /** Load credentials from persistent storage */
   if (loadCredentials()){
     SerialPrintln("Loaded credentials from EEPROM");
 
     if (connectWifi()){
-      sendI2cMessage("w=1");
+      sendI2cMessage(I2C_WIFI_STATUS, 1);
     }
   }
   else {
     SerialPrintln("FAILED to load credentials. Setup needed.");
   }
+}
+
+void loop() {
+
+  /** Need wifi or do nothing */
+  static int wifiStatus = 0;
+  if (wifiStatus++ % 20 == 0){ // 1 Hz
+    sendI2cMessage(I2C_WIFI_STATUS, (WiFi.status() == WL_CONNECTED ? 1 : 0));
+  }
+
+  if (WiFi.status() != WL_CONNECTED){
+    if (!connectWifi()){
+      delay(200);
+      return;
+    }
+  }
+  
+  /** Check for serial communication */
+  if(SerialAvailable()){
+    String msg = SerialReadStringUntil('\r');
+    handleMessage(msg);
+  }
+
+  /** Check for I2C messages */
+  uint8_t address; 
+  int hvalue;
+  if (getI2cRequest(address, hvalue)){
+    if (address > 0 && address < 255 && hvalue >= 0 && hvalue <= 360){
+      String url = "http://192.168.1.";
+      url += address;
+      url += "/h=";
+      url += hvalue;
+      //SerialPrintln("sending " + url);
+      sendHttpGetRequest(url);
+    }
+  }
+   
+  /** Read request from wifi */
+  String request;
+  if (getLocalHttpRequest(request)){
+    if (request.startsWith("h=")){
+      // send to arduino
+      int val = request.substring(2).toInt();
+      if (val >= 0 && val <= 360){
+        sendI2cMessage(I2C_HSV, val);
+      }
+    }
+    else if (request.startsWith("r=")){   
+      // send on network
+      String url = request.substring(2);
+      sendHttpGetRequest(url);
+    }
+    else{
+      // handle internally
+      handleMessage(request);
+    }
+  }
+
+  delay(50);
 }
 
 void handleMessage(String msg){
@@ -136,10 +210,10 @@ void handleMessage(String msg){
   index = msg.indexOf("reconnect");
   if (index != -1){
     disconnectWifi();
-    sendI2cMessage("w=0");
+    sendI2cMessage(I2C_WIFI_STATUS, 0);
 
     if (connectWifi()){
-      sendI2cMessage("w=1");
+      sendI2cMessage(I2C_WIFI_STATUS, 1);
     }
   }
 
@@ -152,67 +226,41 @@ void handleMessage(String msg){
   }
 }
 
-void loop() {
-  
-  /** Check for serial communication */
-  if(SerialAvailable()){
-    String msg = SerialReadStringUntil('\r');
-    handleMessage(msg);
-  }
-
-  /** Check for I2C messages */
-  String i2cRequest = getI2cRequest();
-  if (i2cRequest.length() > 0){
-    String url = "http://192.168.1.120/h=" + i2cRequest;
-    sendHttpGetRequest(i2cRequest);
-  }
-   
-  /** Read request from wifi */
-  String request;
-  if (getLocalHttpRequest(request)){
-    if (request.startsWith("h=")){
-      // send to arduino
-      String h = request.substring(2);
-      sendI2cMessage(h);
-    }
-    else if (request.startsWith("r=")){   
-      // send on network
-      String url = request.substring(2);
-      sendHttpGetRequest(url);
-    }
-    else{
-      // handle internally
-      handleMessage(request);
-    }
-  }
-
-  delay(50);
-}
-
 /** I2C Master: Send data to slave node */
-int sendI2cMessage(String message){
+int sendI2cMessage(I2C_MSG_TYPE type, int value){
 
-  memset(i2cBuffer, 0, I2C_BUF_SIZE);  
-  message.toCharArray(i2cBuffer, message.length()+1);
-  
+  static uint8_t buffer[I2C_BUF_SIZE];
+  memset(buffer, 0, I2C_BUF_SIZE);
+  buffer[0] = byte(type);             // 1 byte - message type
+  buffer[1] = value >> 8;             // 2 byte - value
+  buffer[2] = value & 0xFF;
+
   Wire.beginTransmission(I2C_ADDRESS);
-  Wire.write(i2cBuffer);
+  Wire.write(buffer, I2C_BUF_SIZE);
   return Wire.endTransmission();
 }
 
 /** I2C Master: Request data from slave node */
-String getI2cRequest(){
-  String s = "";
+bool getI2cRequest(uint8_t & address, int & value){
+
+  static uint8_t buffer[I2C_BUF_SIZE];
+  memset(buffer, 0, I2C_BUF_SIZE);
+
   Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
-  while (Wire.available()){
-    // check valid ascii values 
-    // https://www.arduino.cc/en/Reference/ASCIIchart
-    char c = (char)Wire.read();
-    if (c>32 && c <127){
-      s += c;
+  int i = 0;
+  while (Wire.available()) {
+    buffer[i++] = (uint8_t)Wire.read();
+  }
+
+  if (i == I2C_BUF_SIZE) {
+    if (buffer[0] == 1){
+      address = buffer[1];
+      value   = (buffer[2] << 8) | buffer[3];
+      return true;
     }
   }
-  return s;
+
+  return false;
 }
  
 /** HTTP: connect to remote HTTP server */
@@ -226,12 +274,6 @@ void sendHttpGetRequest(String url){
 /** HTTP: Check for HTTP requests */
 bool getLocalHttpRequest(String &request){
 
-  if (WiFi.status() != WL_CONNECTED){
-    if (!connectWifi()){
-      return false;
-    }
-  }
-
   WiFiClient client = server.available();
   if (!client) {
     return false;
@@ -244,7 +286,6 @@ bool getLocalHttpRequest(String &request){
       return false;
     delay(1);
   }
-
 
   // Read the first line of the request
   request = client.readStringUntil('\r');

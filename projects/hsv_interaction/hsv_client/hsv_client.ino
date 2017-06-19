@@ -12,10 +12,10 @@
 
 enum WifiState{
   WIFI_INIT = 0,
-  WIFI_CONNECTING,    // connecting to wifi
-  WIFI_WAITING,       // waiting for instructions
-  WIFI_CONNECTED      // connected and instructed
+  WIFI_DISCONNECTED,  // connecting to wifi
+  WIFI_CONNECTED,     // connected and instructed
 };
+
 
 
 #define SERIAL_TX 10            // To RX  on ESP8266
@@ -23,7 +23,7 @@ enum WifiState{
 #define SERIAL_RESET 6          // To Res on ESP8266
 #define I2C_ADDRESS 8           // Address on i2c bus
 #define I2C_BUF_SIZE 4
-char i2cBuffer[I2C_BUF_SIZE];
+
 
 /*
  * Communication over Software Serial for ESP8266 setup and debugging 
@@ -64,9 +64,7 @@ HSV           pixels[NUM_PIXELS];
 HSV           targetHSV;
 int16_t       targetPixel = 0;
 WifiState     wifiState = WIFI_INIT;
-unsigned long wifiCmdTime    = 0; 
-unsigned long wifiTimeout = 5000;
-unsigned long lastRequest = 0;
+unsigned long i2cHeartbeat = 0; 
 
 void setup() {
   
@@ -108,11 +106,8 @@ void loop() {
   /** If using SoftwareSerial */
   handleSerialCommunication();
 
-  static int kkk = 0;
-  if (kkk++ % 1000)
-    Serial.println(wifiCmdTime);
-
-  if (wifiCmdTime + 3000 < millis()){ //5sec
+  /** If I2C conncetion is dead, try to clear bus */
+  if (i2cHeartbeat + 30000 < millis()){ //30sec
     Serial.println("resetting ");
     I2C_ClearBus();
     Wire.begin();
@@ -121,53 +116,58 @@ void loop() {
   }
 
   /** Is connection active */
-  if (wifiState == WIFI_CONNECTED && wifiCmdTime + wifiTimeout < millis()){ //5sec
-    wifiState = WIFI_WAITING;
+  if (wifiState == WIFI_CONNECTED && i2cHeartbeat + 5000 < millis()){ //5sec
+    wifiState = WIFI_DISCONNECTED;
   }
 
   /** Update pixels */
   switch(wifiState){
-    case WIFI_INIT:       pulse(HSV_RED, 25);     break;
-    case WIFI_CONNECTING: pulse(HSV_ORANGE,25);   break;
-    case WIFI_WAITING:    pulse(HSV_GREEN,25);    break;
-    case WIFI_CONNECTED:  pixelChase(25);         break;
+    case WIFI_INIT:         pulse(HSV_RED, 25);     break;
+    case WIFI_DISCONNECTED: pulse(HSV_GREEN,25);   break;
+    case WIFI_CONNECTED:    pixelChase(25);         break;
   }
 }
 
 /** I2C Slave: Handle data send by i2c master */
 void onI2cReceived(int howMany) {
 
-  String str = "";
+  static uint8_t buf[I2C_BUF_SIZE];
+  memset(buf, 0, I2C_BUF_SIZE);
+
+  int i = 0;
   while (Wire.available()) {
-    str += (char)Wire.read();
+    buf[i++] = (byte)Wire.read();
   }
 
-   if (str.length() > 0){
-    wifiCmdTime = millis();
-
-    if (str.startsWith("w=")){
-      int state = str.substring(2).toInt();
-      wifiState = (state == 0 ? WIFI_CONNECTING : WIFI_WAITING);
+  if (i == I2C_BUF_SIZE){
+    
+    int value = (buf[1] << 8) | buf[2];
+    if (buf[0] == 1){
+        Serial.print("wifi: ");
+        Serial.println(value);
+        wifiState = (value == 0 ? WIFI_DISCONNECTED : WIFI_CONNECTED);
     }
-    else {
-      int h       = str.toInt();
-      targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
-      targetPixel = random(strip.numPixels());
-      wifiState   = WIFI_CONNECTED;
-    }
+    if (buf[0] == 2){
+        int h = (buf[1] << 8) | buf[2];
+        Serial.print("hsv: ");
+        Serial.println(value);
+        targetHSV   = HSV(h/360.0f, 1.0f, 1.0f, 1.0f);
+        targetPixel = random(strip.numPixels());
+    }  
+  
+    i2cHeartbeat = millis();
   }
 }
 
 /** I2C Slave: On request, send data to master (esp8266) */
 void onI2cRequest() {
   
-  if (lastRequest + 500 < millis()){
-    memset(i2cBuffer, 0, I2C_BUF_SIZE);
-    Wire.write(i2cBuffer, I2C_BUF_SIZE);
+  static unsigned long lastI2cSent = 0;
+  static uint8_t buffer[I2C_BUF_SIZE];
+  memset(buffer, 0, I2C_BUF_SIZE);
 
-    lastRequest = millis();
-    wifiCmdTime = millis();
-  }
+  i2cHeartbeat = millis();
+  Wire.write(buffer, I2C_BUF_SIZE);
 }
 
 /** SoftwareSerial: Handle SoftwareSerial <> Serial communication */
@@ -250,7 +250,7 @@ void pulse(const HSV &hsv, uint8_t wait){
     delay(wait);
 }
 
-/**
+/** Clear I2C bus on error
  * SOURCE: http://www.forward.com.au/pfod/ArduinoProgramming/I2C_ClearBus/index.html
  * This routine turns off the I2C bus and clears it
  * on return SCA and SCL pins are tri-state inputs.
@@ -262,7 +262,6 @@ void pulse(const HSV &hsv, uint8_t wait){
  *         2 if SDA held low by slave clock stretch for > 2sec
  *         3 if SDA held low after 20 clocks.
  */
- 
 int I2C_ClearBus() {
 #if defined(TWCR) && defined(TWEN)
   TWCR &= ~(_BV(TWEN)); //Disable the Atmel 2-Wire interface so we can control the SDA and SCL pins directly
