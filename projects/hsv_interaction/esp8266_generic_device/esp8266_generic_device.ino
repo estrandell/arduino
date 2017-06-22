@@ -4,11 +4,15 @@
  * Copyright (c) 2017 Ebbe Strandell
  * https://github.com/estrandell/arduino
  * 
+ * 
+ * See Readme.txt for setup information and how to flash the ESP8266
+ * 
  */
  
 #include <EEPROM.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
+#include <WiFiUdp.h>
 #include <Wire.h>
 
 
@@ -17,7 +21,7 @@
  * As such we send data over the I2C bus, and may skip the serial com for performance.
  */
 
-//#define USE_SERIAL
+#define USE_SERIAL
 #ifdef USE_SERIAL
   #define SerialAvailable()         Serial.available()
   #define SerialBegin(x)            Serial.begin(x)
@@ -32,32 +36,12 @@
   #define SerialReadStringUntil(x)  ""
 #endif
 
-/*
- * --- Baud rate on the ESP8266 ---
- * How to change the baud rate on the ESP8266 will depend on the firmware version. 
- * I've had success with AT+IPR=9600. You only need to run this command once (it's a persistent setting).
- * 
- * 
- * --- How to connect everything ---
- * This is far from the whole truth, ill post diagram in the future
- * https://diyhacking.com/esp8266-tutorial/
- * 
- * 
- * --- Commands ---
- * AT+RST—Restarts the Module
- * AT+GMR—Checks Version Information
- * AT+RESTORE—Restores the Factory Default Settings
- * 
- * AT+CWLAP - Lists available APs.
- * AT+CWQAP - Disconnects from an AP  
-*/
 
 #define SSID_LEN 32
 #define PASS_LEN 32
 #define EEPROM_LEN 512
 char ssid[SSID_LEN];
 char password[PASS_LEN];
-
 
 /**
  * Protocol:
@@ -79,9 +63,12 @@ char password[PASS_LEN];
 #define I2C_ADDRESS 8
 #define I2C_BUF_SIZE 4
 
-#define SERVER_PORT 80
-WiFiServer server(SERVER_PORT);
-
+#define HTTP_PORT 80
+#define UDP_LOCAL_PORT 7777
+#define UDP_REMOTE_PORT 7777
+WiFiServer server(HTTP_PORT);
+WiFiUDP udpServer;
+IPAddress broadCastIp(192, 168, 1, 255);
 
 void setup() {
 
@@ -90,7 +77,7 @@ void setup() {
   SerialPrintln("");
   SerialPrintln("*** Program start ***");
   SerialPrintln("");
-  delay(100);
+  delay(5);
 
   /** Setup I2C communication */
   Wire.begin(0, 2);
@@ -107,9 +94,17 @@ void setup() {
   else {
     SerialPrintln("FAILED to load credentials. Setup needed.");
   }
+
+  delay(5);
 }
 
 void loop() {
+
+  /** Check for serial communication */
+  if(SerialAvailable()){
+    String msg = SerialReadStringUntil('\r');
+    handleMessage(msg);
+  }
 
   /** Need wifi or do nothing */
   static int wifiStatus = 0;
@@ -123,12 +118,6 @@ void loop() {
       return;
     }
   }
-  
-  /** Check for serial communication */
-  if(SerialAvailable()){
-    String msg = SerialReadStringUntil('\r');
-    handleMessage(msg);
-  }
 
   /** Check for I2C messages */
   uint8_t address; 
@@ -139,10 +128,25 @@ void loop() {
       url += address;
       url += "/h=";
       url += hvalue;
-      //SerialPrintln("sending " + url);
       sendHttpGetRequest(url);
     }
+    delay(1);
   }
+
+  /** Send UDP package */
+  if (wifiStatus % 20 == 0){
+    SerialPrintln("udp sent");
+    sendUdp(8);
+  }
+
+  /** Check UDP package */
+  int udp = receiveUdp();
+  if (udp >= 0 && udp <= 360){
+    SerialPrint("udp received: ");
+    SerialPrintln(udp);
+    sendI2cMessage(I2C_HSV, udp);
+  }
+
    
   /** Read request from wifi */
   String request;
@@ -224,6 +228,32 @@ void handleMessage(String msg){
     SerialPrint("Password: ");
     SerialPrintln(strlen(password)>0 ? "********" : "<no password>");
   }
+}
+
+int receiveUdp() {
+  static const int packetSize = 2;
+  static byte packetBuffer[packetSize];
+
+  int cb = udpServer.parsePacket();
+  if (cb) {
+    udpServer.read(packetBuffer, packetSize);
+    int value = (packetBuffer[0] << 8) | packetBuffer[1];
+    return value;
+  }
+  return -1;
+}
+
+void sendUdp(int value)
+{
+  static const int packetSize = 2;
+  static byte packetBuffer[packetSize]; 
+
+  packetBuffer[0] = value >> 8;
+  packetBuffer[1] = value & 0xFF;
+
+  udpServer.beginPacket(broadCastIp, UDP_REMOTE_PORT);
+  udpServer.write(packetBuffer, packetSize);
+  udpServer.endPacket();
 }
 
 /** I2C Master: Send data to slave node */
@@ -313,12 +343,13 @@ bool getLocalHttpRequest(String &request){
 
 /** WIFI: Connect to network */
 bool connectWifi(){
+
+  // Disconnect if connected
   if (WiFi.status() == WL_CONNECTED){
     disconnectWifi();
   }
 
   // Connect to WiFi network
-  SerialPrintln("");
   SerialPrint("Connecting to ssid: ");
   SerialPrintln(ssid);
   WiFi.begin(ssid, password);
@@ -331,7 +362,6 @@ bool connectWifi(){
     if (i++ == 10){
       SerialPrintln("");
       SerialPrintln("Failed to connect");
-
       return false;
     }
   }
@@ -339,13 +369,21 @@ bool connectWifi(){
   SerialPrintln("");
   SerialPrintln("Wifi connected");
    
-  // Start the server
+  /** Start HTTP server */
   server.begin();
   SerialPrintln("Server started at http://");
   SerialPrint(WiFi.localIP());
   SerialPrintln("/");
 
-  return true;
+  /** Start UDP server */
+  SerialPrintln("Connecting to UDP");
+  if (udpServer.begin(UDP_LOCAL_PORT) == 1){
+    SerialPrint("Connection successful. Port: ");
+    SerialPrintln(udpServer.localPort());
+    return true;
+  }
+  SerialPrintln("Connection failed");
+  return false;
 }
 
 /** WIFI: Disconnect from current network */
