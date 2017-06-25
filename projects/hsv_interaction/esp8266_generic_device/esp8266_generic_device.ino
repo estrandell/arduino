@@ -20,7 +20,7 @@
  * Interrupts caused by SoftwareSerial disturbs the WS2812 update cycle on the Arduino.
  * As such we send data over the I2C bus, and may skip the serial com for performance.
  */
-
+ 
 #define USE_SERIAL
 #ifdef USE_SERIAL
   #define SerialAvailable()         Serial.available()
@@ -37,22 +37,20 @@
 #endif
 
 
+/**
+ * SSID and password to be stored on EEPROM
+ */
 #define SSID_LEN 32
 #define PASS_LEN 32
 #define EEPROM_LEN 512
 char ssid[SSID_LEN];
 char password[PASS_LEN];
 
+
 /**
  * Protocol:
- * ESP <> Server
- * > wifi status
- * < target color
- * < target address
- * 
- * ESP <> Client
- * > wifi status
- * > target color
+ * ESP <> Arduino communication over I2C
+ * See Wire.h for details
  */
  enum I2C_MSG_TYPE{
   I2C_UNKNOWN = 0,
@@ -63,12 +61,23 @@ char password[PASS_LEN];
 #define I2C_ADDRESS 8
 #define I2C_BUF_SIZE 4
 
-#define HTTP_PORT 80
-#define UDP_LOCAL_PORT 7777
-#define UDP_REMOTE_PORT 7777
-WiFiServer server(HTTP_PORT);
-WiFiUDP udpServer;
-IPAddress broadCastIp(192, 168, 1, 255);
+/**  
+ *  Network communication over HTTP and/or UDP.
+ */
+
+//#define USE_HTTP
+#ifdef USE_HTTP
+  #define HTTP_PORT 80
+  WiFiServer server(HTTP_PORT);
+#endif
+
+#define USE_UDP
+#ifdef USE_UDP
+  #define UDP_PORT 7777
+  WiFiUDP udpServer;
+  IPAddress broadCastIp(192, 168, 1, 255);
+#endif
+
 
 void setup() {
 
@@ -81,21 +90,21 @@ void setup() {
 
   /** Setup I2C communication */
   Wire.begin(0, 2);
-  sendI2cMessage(I2C_WIFI_STATUS, 0);
+  sendI2c(I2C_WIFI_STATUS, 0);
 
   /** Load credentials from persistent storage */
   if (loadCredentials()){
     SerialPrintln("Loaded credentials from EEPROM");
 
     if (connectWifi()){
-      sendI2cMessage(I2C_WIFI_STATUS, 1);
+      sendI2c(I2C_WIFI_STATUS, 1);
     }
   }
   else {
     SerialPrintln("FAILED to load credentials. Setup needed.");
   }
 
-  delay(5);
+  delay(50);
 }
 
 void loop() {
@@ -105,11 +114,12 @@ void loop() {
     String msg = SerialReadStringUntil('\r');
     handleMessage(msg);
   }
+  delay(1);
 
   /** Need wifi or do nothing */
   static int wifiStatus = 0;
   if (wifiStatus++ % 20 == 0){ // 1 Hz
-    sendI2cMessage(I2C_WIFI_STATUS, (WiFi.status() == WL_CONNECTED ? 1 : 0));
+    sendI2c(I2C_WIFI_STATUS, (WiFi.status() == WL_CONNECTED ? 1 : 0));
   }
 
   if (WiFi.status() != WL_CONNECTED){
@@ -118,50 +128,48 @@ void loop() {
       return;
     }
   }
+  delay(1);
 
   /** Check for I2C messages */
   uint8_t address; 
   int hvalue;
-  if (getI2cRequest(address, hvalue)){
+  if (receiveI2c(address, hvalue)){
     if (address > 0 && address < 255 && hvalue >= 0 && hvalue <= 360){
-      String url = "http://192.168.1.";
-      url += address;
-      url += "/h=";
-      url += hvalue;
-      sendHttpGetRequest(url);
+      sendHttp(address, hvalue);
+      sendUdp(hvalue);
     }
-    delay(1);
   }
+  delay(1);
 
   /** Send UDP package */
+  /*
   if (wifiStatus % 20 == 0){
-    SerialPrintln("udp sent");
-    sendUdp(8);
+    int val = random(360);
+    SerialPrint("udp sent ");
+    SerialPrintln(val);
+    sendUdp(val);
   }
+  delay(1);
+  */
 
-  /** Check UDP package */
+  /** Check for UDP data */
   int udp = receiveUdp();
   if (udp >= 0 && udp <= 360){
     SerialPrint("udp received: ");
     SerialPrintln(udp);
-    sendI2cMessage(I2C_HSV, udp);
+    sendI2c(I2C_HSV, udp);
   }
+  delay(1);
 
-   
-  /** Read request from wifi */
+  /** Check for HTTP data */
   String request;
-  if (getLocalHttpRequest(request)){
+  if (receiveHttp(request)){
     if (request.startsWith("h=")){
       // send to arduino
       int val = request.substring(2).toInt();
       if (val >= 0 && val <= 360){
-        sendI2cMessage(I2C_HSV, val);
+        sendI2c(I2C_HSV, val);
       }
-    }
-    else if (request.startsWith("r=")){   
-      // send on network
-      String url = request.substring(2);
-      sendHttpGetRequest(url);
     }
     else{
       // handle internally
@@ -169,7 +177,7 @@ void loop() {
     }
   }
 
-  delay(50);
+  delay(45);
 }
 
 void handleMessage(String msg){
@@ -214,10 +222,10 @@ void handleMessage(String msg){
   index = msg.indexOf("reconnect");
   if (index != -1){
     disconnectWifi();
-    sendI2cMessage(I2C_WIFI_STATUS, 0);
+    sendI2c(I2C_WIFI_STATUS, 0);
 
     if (connectWifi()){
-      sendI2cMessage(I2C_WIFI_STATUS, 1);
+      sendI2c(I2C_WIFI_STATUS, 1);
     }
   }
 
@@ -230,7 +238,9 @@ void handleMessage(String msg){
   }
 }
 
+/** UDP: receive UDP value */
 int receiveUdp() {
+#ifdef USE_UDP
   static const int packetSize = 2;
   static byte packetBuffer[packetSize];
 
@@ -241,23 +251,44 @@ int receiveUdp() {
     return value;
   }
   return -1;
+#else
+  return -1;
+#endif
 }
 
-void sendUdp(int value)
-{
+/** UDP: Send UDP value */
+void sendUdp(int value){
+#ifdef USE_UDP
   static const int packetSize = 2;
   static byte packetBuffer[packetSize]; 
 
   packetBuffer[0] = value >> 8;
   packetBuffer[1] = value & 0xFF;
 
-  udpServer.beginPacket(broadCastIp, UDP_REMOTE_PORT);
+  udpServer.beginPacket(broadCastIp, UDP_PORT);
   udpServer.write(packetBuffer, packetSize);
   udpServer.endPacket();
+#endif
+}
+
+/** UDP: Setup UDP server */
+void setupUdp(){
+#ifdef USE_UDP
+  SerialPrintln("Connecting to UDP");
+  if (udpServer.begin(UDP_PORT) == 1){
+    SerialPrint("Connection successful. Port: ");
+    SerialPrintln(udpServer.localPort());
+  }
+  else{
+  SerialPrintln("Connection failed");
+  }
+#else  
+  SerialPrintln("UDP disabled");
+#endif
 }
 
 /** I2C Master: Send data to slave node */
-int sendI2cMessage(I2C_MSG_TYPE type, int value){
+int sendI2c(I2C_MSG_TYPE type, int value){
 
   static uint8_t buffer[I2C_BUF_SIZE];
   memset(buffer, 0, I2C_BUF_SIZE);
@@ -271,7 +302,7 @@ int sendI2cMessage(I2C_MSG_TYPE type, int value){
 }
 
 /** I2C Master: Request data from slave node */
-bool getI2cRequest(uint8_t & address, int & value){
+bool receiveI2c(uint8_t & address, int & value){
 
   static uint8_t buffer[I2C_BUF_SIZE];
   memset(buffer, 0, I2C_BUF_SIZE);
@@ -294,16 +325,23 @@ bool getI2cRequest(uint8_t & address, int & value){
 }
  
 /** HTTP: connect to remote HTTP server */
-void sendHttpGetRequest(String url){
+void sendHttp(int address, int value){
+#ifdef USE_HTTP
+  String url = "http://192.168.1.";
+  url += address;
+  url += "/h=";
+  url += value;
+
   HTTPClient http;
   http.begin(url);
   int httpCode = http.GET(); // zero is OK!
   http.end(); 
+#endif
 }
 
 /** HTTP: Check for HTTP requests */
-bool getLocalHttpRequest(String &request){
-
+bool receiveHttp(String &request){
+#ifdef USE_HTTP
   WiFiClient client = server.available();
   if (!client) {
     return false;
@@ -339,17 +377,33 @@ bool getLocalHttpRequest(String &request){
   
   request = "";
   return false;
+#else
+  request = "";
+  return false;
+#endif
+}
+
+/** HTTP: Setup HTTP server */
+void setupHttp(){
+#ifdef USE_HTTP
+  server.begin();
+  SerialPrintln("Server started at http://");
+  SerialPrint(WiFi.localIP());
+  SerialPrintln("/");
+#else
+  SerialPrintln("HTTP disabled");
+#endif
 }
 
 /** WIFI: Connect to network */
 bool connectWifi(){
 
-  // Disconnect if connected
+  /** Disconnect if connected */
   if (WiFi.status() == WL_CONNECTED){
     disconnectWifi();
   }
 
-  // Connect to WiFi network
+  /** Connect to WiFi network */
   SerialPrint("Connecting to ssid: ");
   SerialPrintln(ssid);
   WiFi.begin(ssid, password);
@@ -369,26 +423,19 @@ bool connectWifi(){
   SerialPrintln("");
   SerialPrintln("Wifi connected");
    
-  /** Start HTTP server */
-  server.begin();
-  SerialPrintln("Server started at http://");
-  SerialPrint(WiFi.localIP());
-  SerialPrintln("/");
+  /** Start HTTP / UDP services */
+  setupHttp();
+  setupUdp();
 
-  /** Start UDP server */
-  SerialPrintln("Connecting to UDP");
-  if (udpServer.begin(UDP_LOCAL_PORT) == 1){
-    SerialPrint("Connection successful. Port: ");
-    SerialPrintln(udpServer.localPort());
-    return true;
-  }
-  SerialPrintln("Connection failed");
-  return false;
+  return true;
 }
 
 /** WIFI: Disconnect from current network */
 void disconnectWifi(){
+#ifdef USE_HTTP
   server.stop();
+#endif
+
   WiFi.disconnect();
 }
 

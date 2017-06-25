@@ -17,11 +17,11 @@ enum WifiState{
 };
 
 
-//#define IS_HOST 
+#define IS_HOST 
 #ifdef IS_HOST
   /** Run as app host */
-  #define DATA_PIN_0 12
-  #define DATA_PIN_1 11
+  #define DATA_PIN_0 2
+  #define DATA_PIN_1 3
   #define NUM_PIXELS 16
   #define BRIGTHNESS 40 
 #else
@@ -77,6 +77,8 @@ HSV           nextHSV;
 bool          getNextHsv = false;
 unsigned long getNextHsvTime = 0;
 
+int lastSent = 0;
+
 WifiState     wifiState   = WIFI_INIT;
 unsigned long i2cHeartbeat = 0;
 
@@ -129,21 +131,25 @@ void loop() {
     Serial.println("resetting ");
     I2C_ClearBus();
     Wire.begin();
-    Wire.onReceive(onI2cReceived);
-    Wire.onRequest(onI2cRequest);
+    //Wire.onReceive(onI2cReceived);
+    //Wire.onRequest(onI2cRequest);
   }
 
-  /** Is connection active */
-  //if (wifiState == WIFI_CONNECTED && i2cHeartbeat + 1000 < millis()){ //5sec
-  //  wifiState = WIFI_DISCONNECTED;
-  //}
+  static int last = 0;
+  if (last != lastSent){
+    Serial.print("Sending ");
+    Serial.println(lastSent);
+    last = lastSent;
+  }
 
   /** Update pixels */
+  #ifndef IS_HOST
   switch(wifiState){
     case WIFI_INIT:         pulse(HSV_RED, 25);     break;
     case WIFI_DISCONNECTED: pulse(HSV_GREEN,25);    break;
     case WIFI_CONNECTED:    pixelChase(25);         break;
   }
+  #endif
 }
 
 /** I2C Slave: Handle data send by i2c master */
@@ -187,10 +193,15 @@ void onI2cRequest() {
   memset(buffer, 0, I2C_BUF_SIZE);
 
 #ifdef IS_HOST
-  if (lastI2cSent + 200 < millis())
+  if (lastI2cSent + 1000 < millis())
   {
+    static int c = 0;
+    c = (c+10) % 360;
+    
     uint8_t addr = (uint8_t)120;
-    int hval = (int)(HSVClockRandom().h*360); //(int)(targetHSV.h*360);  
+    int hval = c;//(int)(HSVClockRandom().h*360); //(int)(targetHSV.h*360);  
+
+    lastSent = hval;
     
     buffer[0] = 1; // data available
     buffer[1] = addr;
@@ -268,42 +279,6 @@ void pixelChase(uint8_t wait){
     strip1.show();
     delay(wait);
 }
-
-
-void pixelChaseRing(uint8_t wait){
-
-    // set main color
-    pixels[targetPixel] = LerpHSV(pixels[targetPixel], targetHSV, 0.05f);
-
-    static const unsigned int numPixels = NUM_PIXELS;
-    for (int i=0; i<numPixels;i++){
-      if (i != targetPixel){
-
-        int a = (i-targetPixel)%numPixels;
-        int b = (targetPixel-i)%numPixels;
-        if ( a < b)
-          pixels[i] = LerpHSV(pixels[i], pixels[(i-1+numPixels)%numPixels], 0.3f);
-        else
-          pixels[i] = LerpHSV(pixels[i], pixels[(i+1+numPixels)%numPixels], 0.3f);
-        
-        pixels[i].v = Clamp01(pixels[i].v - 0.01);
-      }
-
-      strip0.setPixelColor(                i, pixels[i].ToRgb().ToUInt32());
-      strip1.setPixelColor(numPixels - 1 - i, pixels[i].ToRgb().ToUInt32());
-
-      if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
-        targetHSV   = (getNextHsv ? nextHSV : HSVClockRandom());
-        targetPixel = random(numPixels);
-        getNextHsv = false;
-      }
-    }
-
-    strip0.show();
-    strip1.show();
-    delay(wait);
-}
-
 
 /** WS2812: Create a pulse effect */
 void pulse(const HSV &hsv, uint8_t wait){
