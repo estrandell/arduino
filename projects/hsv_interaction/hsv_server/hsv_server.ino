@@ -56,24 +56,24 @@ enum WifiState{
 enum HsvMode{
   HSV_MODE_MONOCHROMATIC = 0,
   HSV_MODE_BOUNCE,
-  HSV_MODE_CHASE
+  HSV_MODE_CHASE,
+  HSV_MODE_DECAY_CHASE,
+  HSV_COUNT
 };
 
 
 /** Run as app client */
 Adafruit_NeoPixel * strip0 = NULL;
 HSV               * pixels = NULL;
+HsvMode           hsvMode = HSV_MODE_MONOCHROMATIC;
 
 HSV               nextHSV;
-bool              getNextHsv = false;
-unsigned long     getNextHsvTime = 0;
 float             nextHValue;
 
 
 WifiState         wifiState     = WIFI_INIT;
 unsigned long     i2cHeartbeat  = 0;
 
-HsvMode           hsvMode       = HSV_MODE_MONOCHROMATIC;
 
 bool              isHost = false;
 int               numPixels = 0;
@@ -83,7 +83,7 @@ void setup() {
   /** Setup serial communication */
   Serial.begin(9600);
   Serial.setTimeout(50);
-  Serial.println("*** Starting program ***");
+  Serial.println("Start");
   randomSeed(analogRead(0));
 
   /** Setup software serial communication, if allowed */
@@ -93,11 +93,12 @@ void setup() {
   SoftSerialSetTimeout(50);
 
   /** Read / write EEPROM */
-  //clearEEPROM();
-  setupEEPROM();
-  Serial.print(" isHost: ");
+  if (!readEEPROM()){
+    Serial.println("EEPROM fail");
+  }
+  Serial.print(" h: ");
   Serial.println(isHost);
-  Serial.print(" numPixels: ");
+  Serial.print(" p: ");
   Serial.println(numPixels);
 
   /** Join i2c bus on address #8 */
@@ -107,18 +108,17 @@ void setup() {
   Wire.onRequest(onI2cRequest);
 
   if (isHost){
-    /** Init NES Controler */
+  /** Init NES Controler */
     pinMode(NES_LATCH_PIN, OUTPUT);  // Latch connection is an output
     pinMode(NES_CLOCK_PIN, OUTPUT);  // Clock connection is an output
     pinMode(NES_DATA_PIN, INPUT);    // Data connection is an Input (because we need to receive the data from the control pad)
   } else {
     /** Init led strip */
+    pixels = new HSV[numPixels];
     strip0 = new Adafruit_NeoPixel(numPixels, DATA_PIN_0, NEO_GRB + NEO_KHZ800);
     strip0->begin();
     strip0->setBrightness(BRIGTHNESS);
     strip0->show(); // Initialize all pixels to 'off'
-
-    pixels = new HSV[numPixels];
   }
 
   /** Reset ESP8266 */
@@ -129,13 +129,20 @@ void setup() {
 }
 
 void loop() {
-
   /** If using SoftwareSerial */
   handleSerialCommunication();
 
+  static WifiState oldWifiState = WIFI_INIT;
+  if (wifiState != oldWifiState){
+    Serial.print("wifi: ");
+    Serial.println(wifiState);
+    oldWifiState = wifiState;
+  }
+
   /** If I2C conncetion is dead, try to clear bus */
   if (i2cHeartbeat + 5000 < millis()){ //30sec
-    Serial.println("resetting ");
+    delay(20);
+    Serial.println("reset");
     I2C_ClearBus();
     Wire.begin();
   }
@@ -150,12 +157,10 @@ void loop() {
 
     switch(hsvMode){
       case HSV_MODE_CHASE : 
-        if (millis() > lastChange + 30000){
-          nextHSV     = HSVClockRandom();
-          getNextHsv  = true;
+      case HSV_MODE_DECAY_CHASE : 
+        if (millis() > lastChange + 15000){
+          nextHValue  = 360.0f * HSVClockRandom().h;
           lastChange  = millis();
-          //Serial.print("new target: ");
-          //Serial.println(nextHSV.h);
         }
         break;
     }
@@ -171,6 +176,7 @@ void loop() {
           case HSV_MODE_MONOCHROMATIC:    setMonoChromatic(25);   break;
           case HSV_MODE_BOUNCE:           pixelBounce(25);        break;
           case HSV_MODE_CHASE:            pixelChase(25);         break;
+          case HSV_MODE_DECAY_CHASE:      pixelDecayChase(25);    break;
         }
         break;
       }
@@ -198,9 +204,8 @@ void onI2cReceived(int howMany) {
       }
       if (byteBuffer[0] == 2){
         /** This is arduino <> arduino data */
-        hsvMode = ((byteBuffer[1] % 3) + 3) % 3;
+        hsvMode = ((byteBuffer[1] % HSV_COUNT) + HSV_COUNT) % HSV_COUNT;
         nextHSV = HSV(data/360.0f, 1.0f, 1.0f, 1.0f);
-        getNextHsv = true;
         getNextHsvTime = millis();
       }  
     }
@@ -265,14 +270,13 @@ bool handleNESControllerData(){
       nextNesRead = 300 + millis();
       dirty = true;
     }else if((data & 0x04) == 0){
-      hsvMode = hsvMode + 1; 
+      hsvMode = (hsvMode + 1) % 16; 
       nextNesRead = 300 + millis();
       Serial.println(hsvMode);
       dirty = true;
     }else if((data & 0x08) == 0){
-      hsvMode = hsvMode -1; 
+      nextHValue = 360.0f * HSVClockRandom().h;
       nextNesRead = 300 + millis();
-      Serial.println(hsvMode);
       dirty = true;
     }else if((data & 0x40) == 0){
       nextHValue = fmod(nextHValue - 0.01f + 360, 360.0f);
@@ -281,7 +285,6 @@ bool handleNESControllerData(){
       nextHValue = fmod(nextHValue + 0.01f, 360.0f);
       dirty = true;
     }
-    
   }
 
   return dirty;
@@ -353,7 +356,40 @@ void pixelChase(uint8_t wait){
   static HSV targetHSV        = HSVClockRandom();
   static int16_t targetPixel  = random(strip0->numPixels());
 
-  
+  /** set main color */
+  pixels[targetPixel]         = LerpHSV(pixels[targetPixel], targetHSV, rise);
+
+  /** grow */
+  for (int i=targetPixel-1; i>=0; i--){
+    pixels[i]   = LerpHSV(pixels[i], pixels[i+1], growth);
+  }
+  for (int i=targetPixel+1; i<numPixels; i++){
+    pixels[i]   = LerpHSV(pixels[i], pixels[i-1], growth);
+  }
+
+  /** set strip */
+  for (int i=0; i<numPixels; i++){
+    strip0->setPixelColor(i, pixels[i].ToRgb().ToUInt32());
+  }
+
+  /** reset ? */
+  if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
+    targetPixel = random(numPixels);
+    targetHSV   = nextHSV;
+  }
+
+  strip0->show();
+  delay(wait);
+}
+
+/** WS2812: Apply color magic */
+void pixelDecayChase(uint8_t wait){
+  static const float rise     = 0.05f; 
+  static const float growth   = 0.3f; 
+  static const float decay    = 0.01f;
+  static HSV targetHSV        = HSVClockRandom();
+  static int16_t targetPixel  = random(strip0->numPixels());
+
   /** set main color */
   pixels[targetPixel]         = LerpHSV(pixels[targetPixel], targetHSV, rise);
 
@@ -375,11 +411,8 @@ void pixelChase(uint8_t wait){
   /** reset ? */
   if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
     targetPixel = random(numPixels);
-    if(getNextHsv){
-      targetHSV   = (getNextHsv ? nextHSV : HSVClockRandom());
+      targetHSV   = nextHSV;
       targetPixel = random(numPixels);
-      getNextHsv = false;
-    }
   }
 
   strip0->show();
@@ -406,73 +439,14 @@ void pulse(const HSV &hsv, uint8_t wait){
   delay(wait);
 }
 
-/** setup EEPROM stuff */
-void setupEEPROM(){
-  if (!readEEPROM()){
-    unsigned long t0 = millis();
-    Serial.println("Failed to read EEPROM. Press any key for setup or wait 10s to skip");
-    while (Serial.available() == 0){
-      if (millis() > t0 + 10000){
-        Serial.println("Skipped");
-        break;
-      }
-    }
-
-    if (Serial.available() != 0){
-      Serial.readStringUntil('\r');
-      Serial.print("isHost (0/1): ");
-      while (Serial.available() == 0){}
-      isHost    = (bool)Serial.readStringUntil('\r').toInt();
-
-      Serial.print("\nnumPixels :" );
-      while (Serial.available() == 0){}
-      numPixels = Serial.readStringUntil('\r').toInt();
-
-      Serial.print("isHost: ");
-      Serial.print(isHost);
-      Serial.print(" ,numPixels: ");
-      Serial.println(numPixels);
-
-      Serial.print("save? (0/1): ");
-      while (Serial.available() == 0){}
-      if (1 == Serial.readStringUntil('\r').toInt()){
-        Serial.println("Write settings to EEPROM");
-        writeEEPROM();
-      }
-    }
-  }
-}
-
 /** EEPROM: read */
 bool readEEPROM(){
   isHost     = EEPROM.read(0);
   numPixels  = (EEPROM.read(1) << 8) | EEPROM.read(2);
   byte ok    = EEPROM.read(3);
-  if (ok == 231) {
-    return true;
-  }
-  else{
-    return false;
-  }
+  return (ok == 231);
  }
  
-/** EEPROM: Store credentials */
-void writeEEPROM() {
-  static const char ok[2+1] = "OK";
-  EEPROM.write(0, isHost);
-  EEPROM.write(1, numPixels >> 8);
-  EEPROM.write(2, numPixels & 0xFF);
-  EEPROM.write(3, (byte)231);
-}
-
-/** EEPROM: Clear credentials */
-void clearEEPROM(){
-  static const byte zero = 0;
-  for (int i = 0 ; i < EEPROM.length() ; i++) {
-    EEPROM.write(i, zero);
-  }
-}
-
 /** I2C: Clear bus
  * SOURCE: http://www.forward.com.au/pfod/ArduinoProgramming/I2C_ClearBus/index.html
  * This routine turns off the I2C bus and clears it
