@@ -48,18 +48,17 @@ char password[PASS_LEN];
 
 
 /**
- * Protocol:
  * ESP <> Arduino communication over I2C
- * See Wire.h for details
  */
+#define I2C_ADDRESS 8
+#define I2C_BUF_SIZE 4
+
  enum I2C_MSG_TYPE{
   I2C_UNKNOWN = 0,
   I2C_WIFI_STATUS,
-  I2C_HSV
+  I2C_USER_DATA
  };
 
-#define I2C_ADDRESS 8
-#define I2C_BUF_SIZE 4
 
 /**  
  *  Network communication over HTTP and/or UDP.
@@ -74,6 +73,7 @@ char password[PASS_LEN];
 #define USE_UDP
 #ifdef USE_UDP
   #define UDP_PORT 7777
+  #define UDP_PACKET_SIZE 4
   WiFiUDP udpServer;
   IPAddress broadCastIp(192, 168, 1, 255);
 #endif
@@ -90,14 +90,14 @@ void setup() {
 
   /** Setup I2C communication */
   Wire.begin(0, 2);
-  sendI2c(I2C_WIFI_STATUS, 0);
+  sendI2cWifiStatus(0);
 
   /** Load credentials from persistent storage */
   if (loadCredentials()){
     SerialPrintln("Loaded credentials from EEPROM");
 
     if (connectWifi()){
-      sendI2c(I2C_WIFI_STATUS, 1);
+      sendI2cWifiStatus(1);
     }
   }
   else {
@@ -109,6 +109,9 @@ void setup() {
 
 void loop() {
 
+  static const int wait = 100;
+  static const int wifiStatusFreq = 1000 / wait;
+
   /** Check for serial communication */
   if(SerialAvailable()){
     String msg = SerialReadStringUntil('\r');
@@ -116,12 +119,13 @@ void loop() {
   }
   delay(1);
 
-  /** Need wifi or do nothing */
+  /** Report wifi status */
   static int wifiStatus = 0;
-  if (wifiStatus++ % 20 == 0){ // 1 Hz
-    sendI2c(I2C_WIFI_STATUS, (WiFi.status() == WL_CONNECTED ? 1 : 0));
+  if (wifiStatus++ % wifiStatusFreq == 0){ // 1 Hz
+    sendI2cWifiStatus(int(WiFi.status() == WL_CONNECTED ? 1 : 0));
   }
 
+  /** Need wifi or do nothing */
   if (WiFi.status() != WL_CONNECTED){
     if (!connectWifi()){
       delay(200);
@@ -131,33 +135,15 @@ void loop() {
   delay(1);
 
   /** Check for I2C messages */
-  uint8_t address; 
-  int hvalue;
-  if (receiveI2c(address, hvalue)){
-    if (address > 0 && address < 255 && hvalue >= 0 && hvalue <= 360){
-      sendHttp(address, hvalue);
-      sendUdp(hvalue);
-    }
+  static uint8_t dataBuffer[UDP_PACKET_SIZE];
+  if (receiveI2c(dataBuffer)){
+    sendUdp(dataBuffer);
   }
   delay(1);
-
-  /** Send UDP package */
-  /*
-  if (wifiStatus % 20 == 0){
-    int val = random(360);
-    SerialPrint("udp sent ");
-    SerialPrintln(val);
-    sendUdp(val);
-  }
-  delay(1);
-  */
 
   /** Check for UDP data */
-  int udp = receiveUdp();
-  if (udp >= 0 && udp <= 360){
-    SerialPrint("udp received: ");
-    SerialPrintln(udp);
-    sendI2c(I2C_HSV, udp);
+  if (receiveUdp(dataBuffer)){
+    sendI2cUserData(dataBuffer);
   }
   delay(1);
 
@@ -168,7 +154,7 @@ void loop() {
       // send to arduino
       int val = request.substring(2).toInt();
       if (val >= 0 && val <= 360){
-        sendI2c(I2C_HSV, val);
+      //  sendI2c(I2C_HSV, val);
       }
     }
     else{
@@ -177,7 +163,7 @@ void loop() {
     }
   }
 
-  delay(45);
+  delay(6);
 }
 
 void handleMessage(String msg){
@@ -222,10 +208,10 @@ void handleMessage(String msg){
   index = msg.indexOf("reconnect");
   if (index != -1){
     disconnectWifi();
-    sendI2c(I2C_WIFI_STATUS, 0);
+    sendI2cWifiStatus(0);
 
     if (connectWifi()){
-      sendI2c(I2C_WIFI_STATUS, 1);
+      sendI2cWifiStatus(1);
     }
   }
 
@@ -239,34 +225,24 @@ void handleMessage(String msg){
 }
 
 /** UDP: receive UDP value */
-int receiveUdp() {
+bool receiveUdp(byte packetBuffer[]) {
 #ifdef USE_UDP
-  static const int packetSize = 2;
-  static byte packetBuffer[packetSize];
-
   int cb = udpServer.parsePacket();
   if (cb) {
-    udpServer.read(packetBuffer, packetSize);
-    int value = (packetBuffer[0] << 8) | packetBuffer[1];
-    return value;
+    udpServer.read(packetBuffer, UDP_PACKET_SIZE);
+    return true;
   }
-  return -1;
+  return false;
 #else
-  return -1;
+  return false;
 #endif
 }
 
 /** UDP: Send UDP value */
-void sendUdp(int value){
+void sendUdp(byte packetBuffer[]){
 #ifdef USE_UDP
-  static const int packetSize = 2;
-  static byte packetBuffer[packetSize]; 
-
-  packetBuffer[0] = value >> 8;
-  packetBuffer[1] = value & 0xFF;
-
   udpServer.beginPacket(broadCastIp, UDP_PORT);
-  udpServer.write(packetBuffer, packetSize);
+  udpServer.write(packetBuffer, UDP_PACKET_SIZE);
   udpServer.endPacket();
 #endif
 }
@@ -288,37 +264,42 @@ void setupUdp(){
 }
 
 /** I2C Master: Send data to slave node */
-int sendI2c(I2C_MSG_TYPE type, int value){
+int sendI2cWifiStatus(int connectionStatus){
 
   static uint8_t buffer[I2C_BUF_SIZE];
-  memset(buffer, 0, I2C_BUF_SIZE);
-  buffer[0] = byte(type);             // 1 byte - message type
-  buffer[1] = value >> 8;             // 2 byte - value
-  buffer[2] = value & 0xFF;
+  buffer[0] = I2C_WIFI_STATUS;          // 1 byte - message type
+  buffer[1] = 0;                        // 1 byte - switch
+  buffer[2] = connectionStatus >> 8;    // 2 byte - data
+  buffer[3] = connectionStatus & 0xFF;
 
   Wire.beginTransmission(I2C_ADDRESS);
   Wire.write(buffer, I2C_BUF_SIZE);
   return Wire.endTransmission();
 }
 
-/** I2C Master: Request data from slave node */
-bool receiveI2c(uint8_t & address, int & value){
 
-  static uint8_t buffer[I2C_BUF_SIZE];
-  memset(buffer, 0, I2C_BUF_SIZE);
+/** I2C Master: Send data to slave node */
+int sendI2cUserData(uint8_t dataBuffer[]){
+
+  dataBuffer[0] = I2C_USER_DATA;
+  Wire.beginTransmission(I2C_ADDRESS);
+  Wire.write(dataBuffer, I2C_BUF_SIZE);
+  return Wire.endTransmission();
+}
+
+/** I2C Master: Request data from slave node */
+bool receiveI2c(uint8_t dataBuffer[]){
+
+  memset(dataBuffer, 0, I2C_BUF_SIZE);
 
   Wire.requestFrom(I2C_ADDRESS, I2C_BUF_SIZE);
   int i = 0;
   while (Wire.available()) {
-    buffer[i++] = (uint8_t)Wire.read();
+    dataBuffer[i++] = (uint8_t)Wire.read();
   }
 
-  if (i == I2C_BUF_SIZE) {
-    if (buffer[0] == 1){
-      address = buffer[1];
-      value   = (buffer[2] << 8) | buffer[3];
-      return true;
-    }
+  if (i == I2C_BUF_SIZE && dataBuffer[0] == 1){
+    return true;
   }
 
   return false;
