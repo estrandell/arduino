@@ -63,17 +63,13 @@ enum HsvMode{
 
 
 /** Run as app client */
-Adafruit_NeoPixel * strip0 = NULL;
-HSV               * pixels = NULL;
-HsvMode           hsvMode = HSV_MODE_MONOCHROMATIC;
-
-HSV               nextHSV;
-float             nextHValue;
-
+Adafruit_NeoPixel * strip0      = NULL;
+HSV               * pixels      = NULL;
+HsvMode           hsvMode       = HSV_MODE_MONOCHROMATIC;
+float             nextHValue    = 0; // [0,1) => [0, 360] deg 
 
 WifiState         wifiState     = WIFI_INIT;
 unsigned long     i2cHeartbeat  = 0;
-
 
 bool              isHost = false;
 int               numPixels = 0;
@@ -159,7 +155,7 @@ void loop() {
       case HSV_MODE_CHASE : 
       case HSV_MODE_DECAY_CHASE : 
         if (millis() > lastChange + 15000){
-          nextHValue  = 360.0f * HSVClockRandom().h;
+          nextHValue  = HSVClockRandom().h;
           lastChange  = millis();
         }
         break;
@@ -205,8 +201,7 @@ void onI2cReceived(int howMany) {
       if (byteBuffer[0] == 2){
         /** This is arduino <> arduino data */
         hsvMode = ((byteBuffer[1] % HSV_COUNT) + HSV_COUNT) % HSV_COUNT;
-        nextHSV = HSV(data/360.0f, 1.0f, 1.0f, 1.0f);
-        getNextHsvTime = millis();
+        nextHValue = data / 360.0f;
       }  
     }
   }
@@ -221,7 +216,7 @@ void onI2cRequest() {
   memset(byteBuffer, 0, I2C_BUF_SIZE);
 
   if (isHost){
-    int hval = (int)nextHValue;
+    int hval = (int)(nextHValue * 360);
     byteBuffer[0] = 1; // data available
     byteBuffer[1] = (byte)hsvMode;
     byteBuffer[2] = hval >> 8;
@@ -261,28 +256,32 @@ bool handleNESControllerData(){
   bool dirty = false;
 
   if (nextNesRead < millis()){ 
+    static const float bigStep = 30.0f / 360.0f;
+    static const float smallStep = 0.01f / 360.0f;
+    static const int wait = 300;
+    
     if ((data & 0x01) == 0){
-      nextHValue = fmod(nextHValue - 30.f + 360, 360.0f);
-      nextNesRead = 300 + millis();
+      nextHValue = fmod(nextHValue - bigStep + 1.0f, 1.0f);
+      nextNesRead = wait + millis();
       dirty = true;
     }else if((data & 0x02) == 0){
-      nextHValue = fmod(nextHValue + 30.f, 360.0f);
-      nextNesRead = 300 + millis();
+      nextHValue = fmod(nextHValue + bigStep, 1.0f);
+      nextNesRead = wait + millis();
       dirty = true;
     }else if((data & 0x04) == 0){
       hsvMode = (hsvMode + 1) % 16; 
-      nextNesRead = 300 + millis();
+      nextNesRead = wait + millis();
       Serial.println(hsvMode);
       dirty = true;
     }else if((data & 0x08) == 0){
-      nextHValue = 360.0f * HSVClockRandom().h;
-      nextNesRead = 300 + millis();
+      nextHValue = HSVClockRandom().h;
+      nextNesRead = wait + millis();
       dirty = true;
     }else if((data & 0x40) == 0){
-      nextHValue = fmod(nextHValue - 0.01f + 360, 360.0f);
+      nextHValue = fmod(nextHValue - smallStep + 1.0f, 1.0f);
       dirty = true;
     }else if((data & 0x80) == 0){
-      nextHValue = fmod(nextHValue + 0.01f, 360.0f);
+      nextHValue = fmod(nextHValue + smallStep, 1.0f);
       dirty = true;
     }
   }
@@ -320,6 +319,7 @@ void resetWifi(){
 
 /** WS2812: Set monochromatic colors */
 void setMonoChromatic(uint8_t wait){
+  HSV nextHSV(nextHValue, 1, 1, 1);
   for (int i=0; i<numPixels; i++){
     strip0->setPixelColor(i, nextHSV.ToRgb().ToUInt32());
   }
@@ -339,7 +339,7 @@ void pixelBounce(uint8_t wait){
   if ( rising && offset >=  limit) rising = false;
   if (!rising && offset <= -limit) rising = true;
 
-  HSV hsv(nextHSV.h + offset, 1.0f, 1.0f, 1.0f);
+  HSV hsv(nextHValue + offset, 1.0f, 1.0f, 1.0f);
   for (int i=0; i<numPixels; i++){
     strip0->setPixelColor(i, hsv.ToRgb().ToUInt32());
   }
@@ -374,8 +374,8 @@ void pixelChase(uint8_t wait){
 
   /** reset ? */
   if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
+    targetHSV   = HSV(nextHValue, 1, 1, 1);
     targetPixel = random(numPixels);
-    targetHSV   = nextHSV;
   }
 
   strip0->show();
@@ -410,9 +410,8 @@ void pixelDecayChase(uint8_t wait){
 
   /** reset ? */
   if (abs(pixels[targetPixel].h - targetHSV.h) < 0.01f){
+    targetHSV   = HSV(nextHValue, 1, 1, 1);
     targetPixel = random(numPixels);
-      targetHSV   = nextHSV;
-      targetPixel = random(numPixels);
   }
 
   strip0->show();
